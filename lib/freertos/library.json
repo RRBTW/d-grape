@@ -1,0 +1,17 @@
+{
+  "name": "freertos",
+  "build": {
+    "flags": [
+      "-mcpu=cortex-m4",
+      "-mthumb",
+      "-mfpu=fpv4-sp-d16",
+      "-mfloat-abi=hard"
+    ],
+    "srcFilter": [
+      "+<*.c>",
+      "+<portable/GCC/ARM_CM4F/*.c>",
+      "+<portable/MemMang/heap_4.c>",
+      "+<CMSIS_RTOS_V2/cmsis_os2.c>"
+    ]
+  }
+}
