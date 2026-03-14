@@ -23,9 +23,6 @@ void TIM6_DAC_IRQHandler(void)
 }
 
 /* ── USB OTG FS ─────────────────────────────────────────────
- *  Подключается после интеграции micro-ROS USB CDC транспорта.
- *  hpcd_USB_OTG_FS будет объявлен в usb_device.c из
- *  micro_ros_stm32cubemx_utils.
  * ────────────────────────────────────────────────────────── */
 
 extern PCD_HandleTypeDef hpcd_USB_OTG_FS;
