@@ -13,29 +13,23 @@
 | МК | STM32F407VGT6, 168 МГц, 1 МБ Flash, 192 КБ RAM |
 | Плата | STM32F407VG Discovery |
 | Моторы | 2 гусеничных + 1 лыжи, PWM 20 кГц |
-| Энкодеры | Квадратурные, 1024 PPR |
+| Энкодеры | Квадратурные 1024 PPR, режим TI12 (4096 отсчётов/об) |
 | IMU | MPU-6050, I2C1, 500 Гц |
 | Связь | USB CDC, PA11/PA12, OTG_FS |
 | Отладка | ST-Link встроенный |
 
 ---
 
-## Сборка и прошивка
+## Быстрый старт
+
+### Нормальный режим (micro-ROS)
 
 ```bash
-# Сборка
-pio run
-
-# Прошивка (ST-Link)
-pio run --target upload
-# или Ctrl+Alt+U в VS Code
+pio run                      # сборка
+pio run --target upload      # прошивка
 ```
 
-Требования: PlatformIO, WSL Ubuntu (для пересборки libmicroros.a — не обязательно, .a уже в репозитории).
-
----
-
-## Запуск micro-ROS агента на PC
+Запустить micro-ROS агента на PC:
 
 ```bash
 # Docker (рекомендуется)
@@ -46,17 +40,52 @@ docker run -it --rm -v /dev:/dev --privileged --net=host \
 ros2 run micro_ros_agent micro_ros_agent serial --dev /dev/ttyACM0
 ```
 
-### Проверка топиков
+Проверка топиков:
 
 ```bash
 ros2 topic list
-
-# Данные скорости и угловой скорости
 ros2 topic echo /d_grape/velocity
-
-# Управление гусеницами (x=левая м/с, y=правая м/с)
 ros2 topic pub /d_grape/wheel_cmd geometry_msgs/msg/Vector3 "{x: 0.3, y: 0.3}"
 ```
+
+### Отладочный режим (без ROS)
+
+Раскомментируй в `include/robot_config.h`:
+
+```c
+#define DEBUG_MODE
+```
+
+Пересобери и прошей. Открой любой Serial Monitor на `COMx` / `/dev/ttyACM0`, **115200 бод**.
+
+Что получишь:
+- Телеметрия 10 Гц — IMU, энкодеры, фильтр Калмана, PID
+- Интерактивная консоль управления
+
+**Клавиши (без Enter):**
+
+| Клавиша | Действие |
+|---|---|
+| `w` | вперёд (+0.1 м/с к обеим гусеницам) |
+| `s` | назад (−0.1 м/с) |
+| `a` | поворот влево |
+| `d` | поворот вправо |
+| пробел | стоп |
+
+**Текстовые команды (+ Enter):**
+
+| Команда | Действие |
+|---|---|
+| `left 0.3 right 0.3` | прямая уставка скоростей [м/с] |
+| `stop` | аварийный стоп + сброс PID |
+| `reset` | обнулить энкодеры |
+| `pid kp 2.0` | изменить Kp на лету |
+| `pid ki 0.1` | изменить Ki (сбрасывает интегратор) |
+| `pid kd 0.05` | изменить Kd |
+| `pid show` | показать текущие коэффициенты |
+| `help` | список всех команд |
+
+> В отладочном режиме `task_microros` не запускается — USB занят консолью и телеметрией.
 
 ---
 
@@ -96,54 +125,60 @@ ros2 topic pub /d_grape/wheel_cmd geometry_msgs/msg/Vector3 "{x: 0.3, y: 0.3}"
 
 ```
 d-grape/
-├── platformio.ini              ← конфигурация сборки
+├── platformio.ini
 ├── extra_scripts.py            ← FPU патч + линковка libmicroros.a
 ├── include/
+│   ├── robot_config.h          ← ВСЕ константы (менять только здесь)
+│   ├── freertos_app.h          ← публичный API + extern глобальных объектов
 │   ├── main.h                  ← extern HAL handles
-│   ├── robot_config.h          ← все физические константы
-│   ├── freertos_app.h          ← публичный API приложения
-│   ├── FreeRTOSConfig.h        ← конфигурация FreeRTOS
-│   ├── stm32f4xx_it.h          ← прерывания
-│   └── usbd_conf.h             ← конфигурация USB Device стека
+│   ├── FreeRTOSConfig.h
+│   ├── stm32f4xx_it.h
+│   └── usbd_conf.h
 ├── src/
-│   ├── main.c                  ← точка входа, инициализация HAL
-│   ├── freertos_app.c          ← ядро приложения, все FreeRTOS задачи
-│   ├── stm32f4xx_it.c          ← обработчики прерываний
-│   ├── microros_transport.c    ← USB CDC транспорт для micro-ROS
-│   └── microros_time.c         ← clock_gettime() через HAL_GetTick()
+│   ├── main.c                  ← инициализация HAL, запуск FreeRTOS
+│   ├── freertos_app.c          ← все задачи, логика управления
+│   ├── microros_transport.c    ← rx_ring, USB CDC транспорт
+│   ├── microros_time.c         ← clock_gettime() для micro-ROS
+│   └── stm32f4xx_it.c
 └── lib/
-    ├── motors/                 ← драйвер моторов (PWM + DIR)
-    ├── encoders/               ← квадратурные энкодеры
-    ├── pid/                    ← ПИД регулятор скорости
-    ├── imu/                    ← драйвер MPU-6050
-    ├── kalman/                 ← фильтр Калмана (IMU + энкодер)
+    ├── motors/                 ← PWM + DIR + встроенный PID
+    ├── encoders/               ← TIM encoder mode, обработка переполнения
+    ├── pid/                    ← D на измерении, anti-windup
+    ├── imu/                    ← MPU-6050, I2C burst 14 байт
+    ├── kalman/                 ← 2D KF: velocity + yaw fusion
+    ├── debug/                  ← только при DEBUG_MODE
+    │   ├── debug.h / debug.c   ← телеметрия 10 Гц
+    │   └── console.h / console.c ← интерактивная консоль
     ├── freertos/               ← FreeRTOS + CMSIS_RTOS_V2
-    ├── usb_cdc/                ← полный USB CDC стек (без CubeMX)
-    │   ├── usbd_conf.c/h       ← HAL PCD callbacks + LL interface
-    │   ├── usbd_desc.c/h       ← USB дескрипторы (VID/PID/Serial)
-    │   ├── usbd_cdc_if.c/h     ← CDC интерфейс (Rx/Tx буферы)
-    │   └── usb_device.c/h      ← MX_USB_DEVICE_Init()
+    ├── usb_cdc/                ← USB CDC стек без CubeMX
     └── micro_ros_platformio/
-        ├── libmicroros/
-        │   ├── libmicroros.a   ← скомпилированная micro-ROS (~10 МБ)
-        │   └── include/        ← заголовки ROS 2
-        └── microros_utils/     ← скрипты пересборки библиотеки
+        └── libmicroros/        ← libmicroros.a + include/
 ```
 
 ---
 
 ## Архитектура
 
-### FreeRTOS задачи
+### FreeRTOS задачи — нормальный режим
 
 | Задача | Частота | Приоритет | Назначение |
 |---|---|---|---|
-| `task_imu` | 500 Гц | AboveNormal | Читает IMU → `g_imu_raw` [mutex] |
+| `task_imu` | 500 Гц | AboveNormal | IMU → `g_imu_raw` [mutex] |
 | `task_robot` | 100 Гц | Normal | Энкодеры → Калман → ПИД → моторы |
 | `task_microros` | 40 Гц | Normal | micro-ROS spin + publish |
 | `task_watchdog` | событийная | High | Аварийный стоп + сброс при зависании |
 
-### Поток данных `task_robot` (100 Гц)
+### FreeRTOS задачи — отладочный режим
+
+| Задача | Частота | Приоритет | Назначение |
+|---|---|---|---|
+| `task_imu` | 500 Гц | AboveNormal | то же |
+| `task_robot` | 100 Гц | Normal | то же |
+| `task_debug` | 10 Гц | Normal | телеметрия → USB CDC |
+| `task_console` | событийная | Normal | парсинг команд из USB CDC |
+| `task_watchdog` | событийная | High | то же |
+
+### Поток данных
 
 ```
 IMU 500Гц ──► g_imu_raw [mutex]
@@ -153,91 +188,65 @@ Encoders ──► speed_mps ──► kf_vel_update() ──► velocity_fused
                                                      │
                                                g_kf_out [mutex]
                                                      │
-                         g_cmd_mps (← ROS) ──► motor_velocity_update()
+              g_cmd_mps ◄── ROS / console ──► motor_velocity_update()
                                                      │ PID
                                                motor_set_duty()
                                                      │
-                                              TIM CCR ──► Motors
+                                             TIM CCR ──► Motors
 ```
 
-### USB CDC транспортный уровень
+### USB CDC — нормальный режим
 
 ```
-ROS 2 Agent (PC)
-      │ USB
-      ▼
-OTG_FS_IRQHandler
-      │
-CDC_Receive_FS()
-      │
-microros_usb_recv_cb() ──► rx_ring[512]
-                                  │
-                    task_microros ◄── usb_cdc_transport_read()
-                    task_microros ──► usb_cdc_transport_write() ──► CDC_Transmit_FS()
+ROS 2 Agent ──USB──► OTG_FS_IRQ ──► CDC_Receive_FS()
+                                          │
+                              microros_usb_recv_cb() ──► rx_ring[512]
+                                                               │
+                                             task_microros ◄──┘
+                                             task_microros ──► CDC_Transmit_FS()
+```
+
+### USB CDC — отладочный режим
+
+```
+Serial Monitor ──USB──► OTG_FS_IRQ ──► CDC_Receive_FS()
+                                             │
+                             microros_usb_recv_cb() ──► rx_ring[512]
+                                                              │
+                                            task_console ◄───┘  (парсинг)
+                                            task_debug ──► CDC_Transmit_FS()  (телеметрия)
+                                            task_console ──► CDC_Transmit_FS() (ответы)
 ```
 
 ---
 
-## Описание файлов
+## Настройка параметров
 
-### `src/main.c`
-Точка входа. Инициализирует всю периферию через HAL и запускает FreeRTOS:
-- `SystemClock_Config()` — 168 МГц (HSE 8 МГц + PLL)
-- `MX_TIM1_Init()` — PWM лыжи, PA8, 20 кГц
-- `MX_TIM2_Init()` — PWM моторы, PA15+PB3, 20 кГц
-- `MX_TIM3/4/5_Init()` — энкодеры (encoder interface mode)
-- `MX_TIM6_Init()` — HAL timebase 1 кГц (не SysTick)
-- `MX_I2C1_Init()` — IMU MPU-6050
-- `MX_USB_DEVICE_Init()` — USB CDC стек
-- `freertos_app_init()` + `osKernelStart()`
-
-### `src/freertos_app.c`
-Ядро приложения. Содержит все задачи, логику управления, инициализацию micro-ROS.
-
-`ros_init()` при старте: устанавливает USB CDC транспорт (`rmw_uros_set_custom_transport`), пингует агента, создаёт ноду и топики. При обрыве связи — перезапускается через `osDelay(1000)`.
-
-### `src/microros_transport.c`
-Кастомный транспорт micro-ROS через USB CDC. Кольцевой буфер `rx_ring[512]` наполняется в `microros_usb_recv_cb()` из прерывания USB. `transport_write()` — блокирующий с таймаутом 20 мс.
-
-### `src/microros_time.c`
-POSIX `clock_gettime()` для голого железа. micro-ROS требует эту функцию для временны́х меток. Реализована через `HAL_GetTick()`, точность ±1 мс.
-
-### `include/robot_config.h`
-Все физические константы в одном месте. **Именно здесь** нужно менять параметры при настройке:
+Все параметры в `include/robot_config.h`:
 
 ```c
-#define ROBOT_WHEEL_RADIUS  0.0877f   // измерить штангенциркулем
-#define ROBOT_TRACK_WIDTH   0.526f    // расстояние между серединами гусениц
-#define PID_KP  1.5f                  // настроить на реальном железе
-#define PID_KI  0.1f
-#define PID_KD  0.05f
-#define CMD_TIMEOUT_MS  500U          // стоп при обрыве связи
-#define IMU_SMPLRT_DIV  1U            // 500 Гц при DLPF=3
+/* Физика */
+#define ROBOT_WHEEL_RADIUS   0.0877f  // измерить штангенциркулем [м]
+#define ROBOT_TRACK_WIDTH    0.526f   // между серединами гусениц [м]
+
+/* Энкодеры */
+#define ENCODER_PPR          4096U    // TI12 режим: 1024 PPR × 4 = 4096 CPR
+
+/* PID */
+#define PID_KP               1.5f
+#define PID_KI               0.1f
+#define PID_KD               0.05f
+
+/* Safety */
+#define CMD_TIMEOUT_MS       500U     // стоп при обрыве связи [мс]
+
+/* IMU */
+#define IMU_SMPLRT_DIV       1U       // 500 Гц при DLPF=3
+#define IMU_I2C_TIMEOUT_MS   1U       // < периода задачи 2 мс
+
+/* Отладочный режим */
+/* #define DEBUG_MODE */
 ```
-
-### `lib/usb_cdc/`
-Полный USB CDC стек без CubeMX. Написан вручную совместимый со старым API STM32CubeF4:
-- `usbd_conf.c` — настройка GPIO PA11/PA12, PCD callbacks, FIFO (Rx=128Б, Tx=64+128Б)
-- `usbd_desc.c` — VID=0x0483, PID=0x5740, серийный номер из UID процессора
-- `usbd_cdc_if.c` — буферы RX/TX по 512 байт, callback при получении данных
-- `usb_device.c` — `MX_USB_DEVICE_Init()`, вызывается из `main.c`
-
-### `lib/pid/`
-ПИД с D-term на измерении (не на ошибке) — устраняет derivative kick при скачке уставки. Anti-windup через ограничение интегратора. Выход нормирован в `[-1.0, +1.0]`.
-
-### `lib/kalman/`
-2D фильтр Калмана. Два независимых экземпляра:
-- **kf_vel**: состояние `[velocity, accel_bias]`, измерения: акселерометр + энкодер
-- **kf_yaw**: состояние `[omega, gyro_bias]`, измерения: гироскоп + энкодер
-
-### `lib/imu/`
-Драйвер MPU-6050 по I2C. 14-байтное burst-чтение accel+temp+gyro. Конвертация в SI: акселерометр → м/с², гироскоп → рад/с. DLPF=3 даёт LPF 42 Гц.
-
-### `lib/encoders/`
-Квадратурные энкодеры через TIM encoder interface. Обработка переполнения ±32767. Формула скорости: `speed = (delta / PPR) × 2π × R / dt`.
-
-### `lib/motors/`
-Драйвер 3 моторов. Знак duty cycle определяет DIR пин, модуль — регистр CCR таймера. Встроенный ПИД контур скорости через `motor_velocity_update()`.
 
 ---
 
@@ -249,20 +258,18 @@ POSIX `clock_gettime()` для голого железа. micro-ROS требуе
 | Flash | 10.6% (111 КБ / 1 МБ) |
 | FreeRTOS Heap | 30 КБ |
 | USB буферы | 2 × 512 Б |
-| micro-ROS RX ring | 512 Б |
+| RX ring | 512 Б |
 
 ---
 
 ## Пересборка libmicroros.a
 
-> Нужно только если хочешь добавить новые ROS 2 пакеты или изменить конфигурацию.
-> В репозитории уже есть готовая `.a` для STM32F407.
+> Нужно только при добавлении новых ROS 2 пакетов. Готовая `.a` уже в репозитории.
 
 Требуется: WSL Ubuntu, `colcon`, `arm-none-eabi-gcc`.
 
 ```bash
-# В WSL
-cd /home/roma/micro_ros_build
+cd /home/user/micro_ros_build
 colcon build --merge-install \
   --packages-ignore lttngpy rcl_logging_spdlog test_tracetools rclc_examples \
   --cmake-args \

@@ -97,6 +97,12 @@ float kf_vel_update(KF2_t *kf, float ax, float v_enc)
     kf->P[1][0] = p10_pred - k1 * p00_pred;
     kf->P[1][1] = p11_pred - k1 * p01_pred;
 
+    /* Баг 7: P должна оставаться симметричной — принудительно выравниваем
+     * P[0][1] и P[1][0] чтобы подавить накопление численной асимметрии */
+    float p01_sym = (kf->P[0][1] + kf->P[1][0]) * 0.5f;
+    kf->P[0][1] = p01_sym;
+    kf->P[1][0] = p01_sym;
+
     return kf->x[0];
 }
 
@@ -170,6 +176,11 @@ float kf_yaw_update(KF2_t *kf, float gz, float omega_enc,
     kf->P[0][1] = (1.0f - k0_2) * p01_pred;
     kf->P[1][0] = p10_pred - k1_2 * p00_pred;
     kf->P[1][1] = p11_pred - k1_2 * p01_pred;
+
+    /* Симметризация P */
+    float p01_sym = (kf->P[0][1] + kf->P[1][0]) * 0.5f;
+    kf->P[0][1] = p01_sym;
+    kf->P[1][0] = p01_sym;
 
     kf->x[0] = x0_upd;
     kf->x[1] = x1_upd;

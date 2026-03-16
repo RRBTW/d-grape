@@ -14,7 +14,9 @@
 #define ROBOT_TRACK_WIDTH           0.526f    /* [м] полная колея (2*LEN) */
 
 /* ── Энкодеры ───────────────────────────────────────────────*/
-#define ENCODER_PPR                 1024U
+/* TIM_ENCODERMODE_TI12 считает оба фронта обоих каналов (×4).
+ * Физических импульсов на оборот = 1024, отсчётов таймера = 4096. */
+#define ENCODER_PPR                 4096U
 #define ENCODER_TIMER_PERIOD        0xFFFFU
 #define ENCODER_LEFT_TIM            TIM3
 #define ENCODER_RIGHT_TIM           TIM4
@@ -60,7 +62,7 @@
  *  AD0 = GND → I2C addr = 0x68
  * ────────────────────────────────────────────────────────── */
 #define IMU_I2C_ADDR                (0x68U << 1)
-#define IMU_I2C_TIMEOUT_MS          5U
+#define IMU_I2C_TIMEOUT_MS          1U
 #define IMU_ACCEL_FS_G              2             /* ±2g  → LSB/g = 16384  */
 #define IMU_GYRO_FS_DPS             250           /* ±250°/s → LSB = 131   */
 #define IMU_DLPF_CFG                3             /* LPF ~42 Гц            */
@@ -113,3 +115,24 @@
 /* ── Расчётные ──────────────────────────────────────────────*/
 #define PID_DT_S   (TASK_ROBOT_PERIOD_MS / 1000.0f)
 #define IMU_DT_S   (TASK_IMU_PERIOD_MS   / 1000.0f)
+
+/* ── Отладочный режим ───────────────────────────────────────
+ *
+ *  Раскомментируй строку ниже чтобы включить debug-режим:
+ *    - task_microros НЕ запускается (micro-ROS молчит)
+ *    - вместо него стартует task_debug
+ *    - task_debug каждые DEBUG_PERIOD_MS печатает в USB CDC
+ *      человекочитаемый отчёт о состоянии всей системы
+ *
+ *  Смотреть вывод: любой Serial Monitor, 115200 бод,
+ *  или: python -m serial.tools.miniterm COMx 115200
+ * ────────────────────────────────────────────────────────── */
+
+/* #define DEBUG_MODE */
+#define DEBUG_MODE
+
+#ifdef DEBUG_MODE
+#define TASK_DEBUG_STACK        512U
+#define TASK_DEBUG_PRIORITY     osPriorityNormal
+#define TASK_DEBUG_PERIOD_MS    100U   /* 10 Гц — не перегружаем USB */
+#endif

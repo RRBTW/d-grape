@@ -8,19 +8,29 @@
 #include "stm32f4xx_hal.h"
 #include "cmsis_os2.h"
 
+#include <math.h>   /* isfinite() */
+
 #include "motors.h"
 #include "encoders.h"
 #include "imu.h"
 #include "kalman.h"
 
-#include <rcl/rcl.h>
-#include <rcl/error_handling.h>
-#include <rclc/rclc.h>
-#include <rclc/executor.h>
-#include <rmw_microros/rmw_microros.h>
-#include <geometry_msgs/msg/vector3.h>
-#include <sensor_msgs/msg/imu.h>
-#include <diagnostic_msgs/msg/diagnostic_array.h>
+#ifdef DEBUG_MODE
+#  include "debug.h"
+#  include "console.h"
+#else
+/* rcl_publish() объявлен с warn_unused_result — (void) не помогает в GCC.
+ * Присваивание во временную переменную гарантированно гасит варнинг. */
+#  define RCL_PUB(pub, msg) do { rcl_ret_t _r = rcl_publish((pub),(msg),NULL); (void)_r; } while(0)
+#  include <rcl/rcl.h>
+#  include <rcl/error_handling.h>
+#  include <rclc/rclc.h>
+#  include <rclc/executor.h>
+#  include <rmw_microros/rmw_microros.h>
+#  include <geometry_msgs/msg/vector3.h>
+#  include <sensor_msgs/msg/imu.h>
+#  include <diagnostic_msgs/msg/diagnostic_array.h>
+#endif
 
 #include "usb_device.h"
 
@@ -32,9 +42,9 @@ extern I2C_HandleTypeDef hi2c1;
 /*  ГЛОБАЛЬНОЕ СОСТОЯНИЕ                                      */
 /* ══════════════════════════════════════════════════════════ */
 
-static volatile float    g_cmd_left_mps  = 0.0f;
-static volatile float    g_cmd_right_mps = 0.0f;
-static volatile uint32_t g_last_cmd_ms   = 0;
+volatile float    g_cmd_left_mps  = 0.0f;
+volatile float    g_cmd_right_mps = 0.0f;
+volatile uint32_t g_last_cmd_ms   = 0;
 
 static IMU_Raw_t         g_imu_raw;
 static osMutexId_t       g_imu_mutex;
@@ -51,10 +61,10 @@ static osThreadId_t      g_watchdog_handle;
 /*  АППАРАТНЫЕ ОБЪЕКТЫ                                        */
 /* ══════════════════════════════════════════════════════════ */
 
-static Encoder_t g_enc_left  = { .htim = &htim3 };
-static Encoder_t g_enc_right = { .htim = &htim4 };
+Encoder_t g_enc_left  = { .htim = &htim3 };
+Encoder_t g_enc_right = { .htim = &htim4 };
 
-static Motor_t g_motor_left = {
+Motor_t g_motor_left = {
     .htim     = &htim2,
     .channel  = MOTOR_LEFT_CHANNEL,
     .ccr      = &MOTOR_LEFT_CCR,
@@ -62,7 +72,7 @@ static Motor_t g_motor_left = {
     .dir_port = MOTOR_LEFT_DIR_PORT,
     .dir_pin  = MOTOR_LEFT_DIR_PIN,
 };
-static Motor_t g_motor_right = {
+Motor_t g_motor_right = {
     .htim     = &htim2,
     .channel  = MOTOR_RIGHT_CHANNEL,
     .ccr      = &MOTOR_RIGHT_CCR,
@@ -70,7 +80,7 @@ static Motor_t g_motor_right = {
     .dir_port = MOTOR_RIGHT_DIR_PORT,
     .dir_pin  = MOTOR_RIGHT_DIR_PIN,
 };
-static Motor_t g_motor_skis = {
+Motor_t g_motor_skis = {
     .htim     = &htim1,
     .channel  = MOTOR_SKIS_CHANNEL,
     .ccr      = &MOTOR_SKIS_CCR,
@@ -83,8 +93,9 @@ static KF2_t g_kf_vel;
 static KF2_t g_kf_yaw;
 
 /* ══════════════════════════════════════════════════════════ */
-/*  micro-ROS                                                 */
+/*  micro-ROS  (не компилируется в DEBUG_MODE)                */
 /* ══════════════════════════════════════════════════════════ */
+#ifndef DEBUG_MODE
 
 static rcl_node_t          g_node;
 static rcl_allocator_t     g_allocator;
@@ -109,9 +120,9 @@ static void wheel_cmd_callback(const void *msg_in)
 
     float l = cmd->x, r = cmd->y;
 
-    /* NaN guard */
-    if (l != l) l = 0.0f;
-    if (r != r) r = 0.0f;
+    /* Баг 3: isfinite() ловит и NaN, и ±Inf — оба недопустимы как уставка */
+    if (!isfinite(l)) l = 0.0f;
+    if (!isfinite(r)) r = 0.0f;
 
     /* Clamp */
     const float MAX_MPS = 1.5f;
@@ -120,11 +131,17 @@ static void wheel_cmd_callback(const void *msg_in)
     if (r >  MAX_MPS) r =  MAX_MPS;
     if (r < -MAX_MPS) r = -MAX_MPS;
 
+    /* Баг 9: float не атомарен — защищаем запись пары значений отключением прерываний.
+     * Секция минимальная: 3 записи + восстановление PRIMASK. */
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
     g_cmd_left_mps  = l;
     g_cmd_right_mps = r;
     g_last_cmd_ms   = osKernelGetTickCount();
+    __set_PRIMASK(primask);
 
-    osThreadFlagsSet(g_watchdog_handle, 0x01U);
+    /* Флаг 0x01 убран: watchdog его не ждёт, он был бессмысленным (баг 6).
+     * Watchdog пингуется только из task_robot (флаг 0x02) — это достаточно. */
 }
 
 /* ── Инициализация micro-ROS (повторяется до успеха) ─────── */
@@ -185,6 +202,8 @@ static bool ros_init(void)
 
     return true;
 }
+
+#endif /* ifndef DEBUG_MODE */
 
 /* ══════════════════════════════════════════════════════════ */
 /*  ЗАДАЧА: IMU  500 Гц                                       */
@@ -249,15 +268,29 @@ static void task_robot(void *arg)
         g_kf_out.valid        = imu.valid;
         osMutexRelease(g_kf_mutex);
 
-        /* 4. Safety timeout */
-        if ((osKernelGetTickCount() - g_last_cmd_ms) > CMD_TIMEOUT_MS) {
+        /* 4. Safety timeout — читаем g_last_cmd_ms атомарно */
+        uint32_t primask = __get_PRIMASK();
+        __disable_irq();
+        uint32_t last_cmd = g_last_cmd_ms;
+        __set_PRIMASK(primask);
+
+        if ((osKernelGetTickCount() - last_cmd) > CMD_TIMEOUT_MS) {
+            primask = __get_PRIMASK();
+            __disable_irq();
             g_cmd_left_mps  = 0.0f;
             g_cmd_right_mps = 0.0f;
+            __set_PRIMASK(primask);
         }
 
-        /* 5. PID velocity control */
-        motor_velocity_update(&g_motor_left,  g_cmd_left_mps,  dt);
-        motor_velocity_update(&g_motor_right, g_cmd_right_mps, dt);
+        /* 5. PID velocity control — читаем команды атомарно */
+        primask = __get_PRIMASK();
+        __disable_irq();
+        float cmd_left  = g_cmd_left_mps;
+        float cmd_right = g_cmd_right_mps;
+        __set_PRIMASK(primask);
+
+        motor_velocity_update(&g_motor_left,  cmd_left,  dt);
+        motor_velocity_update(&g_motor_right, cmd_right, dt);
 
         /* 6. Watchdog ping */
         osThreadFlagsSet(g_watchdog_handle, 0x02U);
@@ -265,8 +298,9 @@ static void task_robot(void *arg)
 }
 
 /* ══════════════════════════════════════════════════════════ */
-/*  ЗАДАЧА: micro-ROS  40 Гц                                  */
+/*  ЗАДАЧА: micro-ROS  40 Гц  (не компилируется в DEBUG_MODE) */
 /* ══════════════════════════════════════════════════════════ */
+#ifndef DEBUG_MODE
 static void task_microros(void *arg)
 {
     (void)arg;
@@ -289,13 +323,11 @@ static void task_microros(void *arg)
         kf = g_kf_out;
         osMutexRelease(g_kf_mutex);
 
-        if (!kf.valid) continue;
+        if (!kf.valid) {
+            RCL_PUB(&g_pub_diag, &g_msg_diag);
+            continue;
+        }
 
-        /* Публикуем /d_grape/imu/filtered
-         * linear_acceleration.x  = fused velocity [м/с]
-         * angular_velocity.z     = fused omega [рад/с]
-         * covariance[0]  = KF P00 для velocity
-         * covariance[8]  = KF P00 для omega (индекс 8 = [2][2] 3x3 матрицы) */
         g_msg_imu.linear_acceleration.x            = kf.velocity_mps;
         g_msg_imu.linear_acceleration.y            = 0.0f;
         g_msg_imu.linear_acceleration.z            = 0.0f;
@@ -304,18 +336,17 @@ static void task_microros(void *arg)
         g_msg_imu.angular_velocity.z               = kf.omega_rads;
         g_msg_imu.linear_acceleration_covariance[0] = g_kf_vel.P[0][0];
         g_msg_imu.angular_velocity_covariance[8]    = g_kf_yaw.P[0][0];
-        rcl_publish(&g_pub_imu, &g_msg_imu, NULL);
+        RCL_PUB(&g_pub_imu, &g_msg_imu);
 
-        /* Публикуем /d_grape/velocity */
         g_msg_vel.x = kf.velocity_mps;
         g_msg_vel.y = 0.0f;
         g_msg_vel.z = kf.omega_rads;
-        rcl_publish(&g_pub_vel, &g_msg_vel, NULL);
+        RCL_PUB(&g_pub_vel, &g_msg_vel);
 
-        /* Публикуем /d_grape/diagnostics */
-        rcl_publish(&g_pub_diag, &g_msg_diag, NULL);
+        RCL_PUB(&g_pub_diag, &g_msg_diag);
     }
 }
+#endif /* ifndef DEBUG_MODE */
 
 /* ══════════════════════════════════════════════════════════ */
 /*  ЗАДАЧА: WATCHDOG  high priority                           */
@@ -366,6 +397,79 @@ static void hw_init(void)
 }
 
 /* ══════════════════════════════════════════════════════════ */
+/*  ЗАДАЧА: DEBUG  10 Гц  (только при DEBUG_MODE)             */
+/* ══════════════════════════════════════════════════════════ */
+#ifdef DEBUG_MODE
+static void task_debug(void *arg)
+{
+    (void)arg;
+
+    debug_log("\r\n*** D-Grape DEBUG MODE — micro-ROS disabled ***\r\n");
+
+    uint32_t tick = osKernelGetTickCount();
+
+    for (;;) {
+        osDelayUntil(tick += TASK_DEBUG_PERIOD_MS);
+
+        DebugSnapshot_t snap = {0};
+
+        /* Временная метка */
+        snap.tick_ms = HAL_GetTick();
+
+        /* IMU — под мьютексом */
+        osMutexAcquire(g_imu_mutex, osWaitForever);
+        IMU_Raw_t imu = g_imu_raw;
+        osMutexRelease(g_imu_mutex);
+
+        snap.ax        = imu.ax;
+        snap.ay        = imu.ay;
+        snap.az        = imu.az;
+        snap.gx        = imu.gx;
+        snap.gy        = imu.gy;
+        snap.gz        = imu.gz;
+        snap.temp_c    = imu.temp_c;
+        snap.imu_valid = imu.valid;
+
+        /* Энкодеры — volatile, читаем атомарно */
+        snap.enc_left_mps    = g_enc_left_mps;
+        snap.enc_right_mps   = g_enc_right_mps;
+        snap.enc_left_dist_m  = g_enc_left.distance_m;
+        snap.enc_right_dist_m = g_enc_right.distance_m;
+
+        /* Kalman — под мьютексом */
+        osMutexAcquire(g_kf_mutex, osWaitForever);
+        KF_Output_t kf = g_kf_out;
+        osMutexRelease(g_kf_mutex);
+
+        snap.kf_vel_mps    = kf.velocity_mps;
+        snap.kf_omega_rads = kf.omega_rads;
+        snap.kf_accel_bias = kf.accel_bias;
+        snap.kf_gyro_bias  = kf.gyro_bias;
+        snap.kf_p00_vel    = g_kf_vel.P[0][0];
+        snap.kf_p00_yaw    = g_kf_yaw.P[0][0];
+
+        /* PID */
+        snap.pid_setpoint_left  = g_motor_left.pid.setpoint;
+        snap.pid_setpoint_right = g_motor_right.pid.setpoint;
+        snap.pid_out_left       = g_motor_left.pid.output;
+        snap.pid_out_right      = g_motor_right.pid.output;
+        snap.pid_integral_left  = g_motor_left.pid.integral;
+        snap.pid_integral_right = g_motor_right.pid.integral;
+
+        /* Команда — critical section */
+        uint32_t primask = __get_PRIMASK();
+        __disable_irq();
+        snap.cmd_left_mps  = g_cmd_left_mps;
+        snap.cmd_right_mps = g_cmd_right_mps;
+        snap.last_cmd_ms   = g_last_cmd_ms;
+        __set_PRIMASK(primask);
+
+        debug_print(&snap);
+    }
+}
+#endif /* DEBUG_MODE */
+
+/* ══════════════════════════════════════════════════════════ */
 /*  ТОЧКА ВХОДА                                               */
 /* ══════════════════════════════════════════════════════════ */
 void freertos_app_init(void)
@@ -374,6 +478,11 @@ void freertos_app_init(void)
 
     g_imu_mutex = osMutexNew(NULL);
     g_kf_mutex  = osMutexNew(NULL);
+
+#ifdef DEBUG_MODE
+    debug_init();
+    console_init();
+#endif
 
     osThreadAttr_t attr = {0};
 
@@ -387,15 +496,26 @@ void freertos_app_init(void)
     attr.priority   = TASK_ROBOT_PRIORITY;
     osThreadNew(task_robot, NULL, &attr);
 
+#ifdef DEBUG_MODE
+    /* В отладочном режиме — task_debug + task_console вместо task_microros */
+    attr.name       = "debug";
+    attr.stack_size = TASK_DEBUG_STACK;
+    attr.priority   = TASK_DEBUG_PRIORITY;
+    osThreadNew(task_debug, NULL, &attr);
+
+    attr.name       = "console";
+    attr.stack_size = TASK_CONSOLE_STACK;
+    attr.priority   = TASK_CONSOLE_PRIORITY;
+    osThreadNew(task_console, NULL, &attr);
+#else
     attr.name       = "microros";
     attr.stack_size = TASK_MICROROS_STACK;
     attr.priority   = TASK_MICROROS_PRIORITY;
     osThreadNew(task_microros, NULL, &attr);
+#endif
 
     attr.name       = "watchdog";
     attr.stack_size = TASK_WATCHDOG_STACK;
     attr.priority   = TASK_WATCHDOG_PRIORITY;
     g_watchdog_handle = osThreadNew(task_watchdog, NULL, &attr);
-
-    
 }
