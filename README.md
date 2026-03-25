@@ -1,7 +1,7 @@
 # D-Grape
 
-Прошивка гусеничного робота на **STM32F407VG Discovery**.  
-Написана на C, собирается в **PlatformIO** (`stm32cube` framework).  
+Прошивка гусеничного робота на **STM32F407VG Discovery**.
+Написана на C, собирается в **PlatformIO** (`stm32cube` framework).
 Связь с ROS 2 через **micro-ROS** по **USB CDC** (виртуальный COM-порт).
 
 ---
@@ -12,8 +12,10 @@
 |---|---|
 | МК | STM32F407VGT6, 168 МГц, 1 МБ Flash, 192 КБ RAM |
 | Плата | STM32F407VG Discovery |
-| Моторы | 2 гусеничных + 1 лыжи, PWM 20 кГц |
-| Энкодеры | Квадратурные 1024 PPR, режим TI12 (4096 отсчётов/об) |
+| Драйверы моторов | BTS7960B × 2 (dual PWM: RPWM/LPWM, без DIR) |
+| Моторы | 2 гусеничных + 1 лыжи |
+| Частота ШИМ | 20 кГц |
+| Энкодеры | **не подключены** (open-loop режим) |
 | IMU | MPU-6050, I2C1, 500 Гц |
 | Связь | USB CDC, PA11/PA12, OTG_FS |
 | Отладка | ST-Link встроенный |
@@ -23,6 +25,8 @@
 ## Быстрый старт
 
 ### Нормальный режим (micro-ROS)
+
+В `include/robot_config.h` строка `#define DEBUG_MODE` должна быть **закомментирована**.
 
 ```bash
 pio run                      # сборка
@@ -45,8 +49,10 @@ ros2 run micro_ros_agent micro_ros_agent serial --dev /dev/ttyACM0
 ```bash
 ros2 topic list
 ros2 topic echo /d_grape/velocity
-ros2 topic pub /d_grape/wheel_cmd geometry_msgs/msg/Vector3 "{x: 0.3, y: 0.3}"
+ros2 topic pub /d_grape/wheel_cmd geometry_msgs/msg/Vector3 "{x: 0.3, y: -0.3}"
 ```
+
+> ⚠️ Правый мотор стоит **физически инвертированно** — для движения вперёд посылай `x = +v, y = -v`.
 
 ### Отладочный режим (без ROS)
 
@@ -56,10 +62,10 @@ ros2 topic pub /d_grape/wheel_cmd geometry_msgs/msg/Vector3 "{x: 0.3, y: 0.3}"
 #define DEBUG_MODE
 ```
 
-Пересобери и прошей. Открой любой Serial Monitor на `COMx` / `/dev/ttyACM0`, **115200 бод**.
+Пересобери и прошей. Открой любой Serial Monitor на `COMx` / `/dev/ttyACM0`.
 
 Что получишь:
-- Телеметрия 10 Гц — IMU, энкодеры, фильтр Калмана, PID
+- Телеметрия 10 Гц — IMU, фильтр Калмана, PID, USB статус
 - Интерактивная консоль управления
 
 **Клавиши (без Enter):**
@@ -76,10 +82,10 @@ ros2 topic pub /d_grape/wheel_cmd geometry_msgs/msg/Vector3 "{x: 0.3, y: 0.3}"
 
 | Команда | Действие |
 |---|---|
-| `left 0.3 right 0.3` | прямая уставка скоростей [м/с] |
+| `left 0.3 right -0.3` | прямая уставка скоростей [м/с] |
 | `stop` | аварийный стоп + сброс PID |
-| `reset` | обнулить энкодеры |
-| `pid kp 2.0` | изменить Kp на лету |
+| `reset` | сбросить уставки и WASD в 0 |
+| `pid kp 0.5` | изменить Kp на лету |
 | `pid ki 0.1` | изменить Ki (сбрасывает интегратор) |
 | `pid kd 0.05` | изменить Kd |
 | `pid show` | показать текущие коэффициенты |
@@ -104,20 +110,25 @@ ros2 topic pub /d_grape/wheel_cmd geometry_msgs/msg/Vector3 "{x: 0.3, y: 0.3}"
 
 | Функция | Пин | Периферия |
 |---|---|---|
-| PWM левый мотор | PA15 | TIM2 CH1 AF1 |
-| PWM правый мотор | PB3 | TIM2 CH2 AF1 |
+| Левый RPWM (вперёд) | PA15 | TIM2 CH1 AF1 |
+| Левый LPWM (назад) | PA7 | TIM3 CH2 AF2 |
+| Правый RPWM (вперёд) | PB3 | TIM2 CH2 AF1 |
+| Правый LPWM (назад) | PB11 | TIM2 CH4 AF1 |
 | PWM лыжи | PA8 | TIM1 CH1 AF1 |
-| DIR левый | PD0 | GPIO OUT |
-| DIR правый | PD1 | GPIO OUT |
 | DIR лыжи | PD2 | GPIO OUT |
-| Encoder левый A/B | PA6/PA7 | TIM3 AF2 |
+| Encoder левый A/B | PA6/PA7 | TIM3 AF2 ⚠️ занят LPWM |
 | Encoder правый A/B | PB6/PB7 | TIM4 AF2 |
 | Encoder лыжи A/B | PA0/PA1 | TIM5 AF2 |
 | USB D−/D+ | PA11/PA12 | OTG_FS AF10 |
-| USB VBUS sense | PA9 | GPIO IN |
-| HAL Timebase | — | TIM6, 1 кГц |
 | IMU SCL | PB8 | I2C1 AF4 |
 | IMU SDA | PB9 | I2C1 AF4 |
+| LED зелёный (IMU) | PD12 | GPIO OUT |
+| LED оранжевый (моторы) | PD13 | GPIO OUT |
+| LED красный (heartbeat) | PD14 | GPIO OUT |
+| LED синий (связь) | PD15 | GPIO OUT |
+| LED красный (авария) | PE1 | GPIO OUT |
+
+> ⚠️ При подключении энкодеров: перенести левый LPWM с PA7 (TIM3_CH2) на PB10 (TIM2_CH3), чтобы освободить TIM3 под левый энкодер.
 
 ---
 
@@ -132,27 +143,25 @@ d-grape/
 │   ├── freertos_app.h          ← публичный API + extern глобальных объектов
 │   ├── main.h                  ← extern HAL handles
 │   ├── FreeRTOSConfig.h
-│   ├── stm32f4xx_it.h
-│   └── usbd_conf.h
+│   └── stm32f4xx_it.h
 ├── src/
-│   ├── main.c                  ← инициализация HAL, запуск FreeRTOS
+│   ├── main.c                  ← инициализация HAL, TIM, I2C, запуск FreeRTOS
 │   ├── freertos_app.c          ← все задачи, логика управления
-│   ├── microros_transport.c    ← rx_ring, USB CDC транспорт
-│   ├── microros_time.c         ← clock_gettime() для micro-ROS
+│   ├── microros_transport.c    ← rx_ring[512], USB CDC транспорт micro-ROS
 │   └── stm32f4xx_it.c
 └── lib/
-    ├── motors/                 ← PWM + DIR + встроенный PID
-    ├── encoders/               ← TIM encoder mode, обработка переполнения
+    ├── motors/                 ← BTS7960B dual PWM (RPWM/LPWM) + встроенный PID
+    ├── encoders/               ← TIM encoder mode (не используется, готово к подключению)
     ├── pid/                    ← D на измерении, anti-windup
-    ├── imu/                    ← MPU-6050, I2C burst 14 байт
-    ├── kalman/                 ← 2D KF: velocity + yaw fusion
+    ├── imu/                    ← MPU-6050, I2C burst 14 байт, 500 Гц
+    ├── kalman/                 ← 2D KF: predict-only (без энкодеров) / fusion (с энкодерами)
     ├── debug/                  ← только при DEBUG_MODE
-    │   ├── debug.h / debug.c   ← телеметрия 10 Гц
-    │   └── console.h / console.c ← интерактивная консоль
+    │   ├── debug.c/h           ← телеметрия 10 Гц по USB CDC
+    │   └── console.c/h         ← интерактивная консоль WASD
     ├── freertos/               ← FreeRTOS + CMSIS_RTOS_V2
-    ├── usb_cdc/                ← USB CDC стек без CubeMX
+    ├── usb_cdc/                ← USB CDC стек (cdc_rx_hook weak callback)
     └── micro_ros_platformio/
-        └── libmicroros/        ← libmicroros.a + include/
+        └── libmicroros/        ← libmicroros.a + include/ (ROS 2 Humble)
 ```
 
 ---
@@ -164,9 +173,9 @@ d-grape/
 | Задача | Частота | Приоритет | Назначение |
 |---|---|---|---|
 | `task_imu` | 500 Гц | AboveNormal | IMU → `g_imu_raw` [mutex] |
-| `task_robot` | 100 Гц | Normal | Энкодеры → Калман → ПИД → моторы |
-| `task_microros` | 40 Гц | Normal | micro-ROS spin + publish |
-| `task_watchdog` | событийная | High | Аварийный стоп + сброс при зависании |
+| `task_robot` | 100 Гц | Normal | IMU → Калман → ПИД → моторы |
+| `task_microros` | 40 Гц | Normal | micro-ROS spin + publish + reconnect |
+| `task_watchdog` | событийная | High | Аварийный стоп + SystemReset при зависании (200 мс таймаут) |
 
 ### FreeRTOS задачи — отладочный режим
 
@@ -175,47 +184,35 @@ d-grape/
 | `task_imu` | 500 Гц | AboveNormal | то же |
 | `task_robot` | 100 Гц | Normal | то же |
 | `task_debug` | 10 Гц | Normal | телеметрия → USB CDC |
-| `task_console` | событийная | Normal | парсинг команд из USB CDC |
+| `task_console` | событийная | Normal | парсинг WASD + команд из USB CDC |
 | `task_watchdog` | событийная | High | то же |
 
 ### Поток данных
 
 ```
-IMU 500Гц ──► g_imu_raw [mutex]
-                    │
-Encoders ──► speed_mps ──► kf_vel_update() ──► velocity_fused
-                       └── kf_yaw_update() ──► omega_fused
-                                                     │
-                                               g_kf_out [mutex]
-                                                     │
-              g_cmd_mps ◄── ROS / console ──► motor_velocity_update()
-                                                     │ PID
-                                               motor_set_duty()
-                                                     │
-                                             TIM CCR ──► Motors
+IMU 500 Гц ──► g_imu_raw [mutex]
+                     │  ax, gz
+                     ▼
+              kf_vel_predict_only()  ──► velocity_fused [м/с]
+              kf_yaw_predict_only()  ──► omega_fused [рад/с]
+                     │
+               g_kf_out [mutex]
+                     │
+g_cmd_mps ◄── ROS /wheel_cmd        ──► motor_velocity_update()
+           ◄── console (WASD)              │ open-loop duty
+                                     TIM CCR ──► BTS7960B ──► Motors
 ```
 
-### USB CDC — нормальный режим
+### USB CDC
 
 ```
-ROS 2 Agent ──USB──► OTG_FS_IRQ ──► CDC_Receive_FS()
-                                          │
-                              microros_usb_recv_cb() ──► rx_ring[512]
-                                                               │
-                                             task_microros ◄──┘
-                                             task_microros ──► CDC_Transmit_FS()
-```
-
-### USB CDC — отладочный режим
-
-```
-Serial Monitor ──USB──► OTG_FS_IRQ ──► CDC_Receive_FS()
-                                             │
-                             microros_usb_recv_cb() ──► rx_ring[512]
+ROS 2 Agent / Serial Monitor
+    │ USB
+    ▼
+OTG_FS_IRQ ──► CDC_Receive_FS() ──► cdc_rx_hook() ──► rx_ring[512]
                                                               │
-                                            task_console ◄───┘  (парсинг)
-                                            task_debug ──► CDC_Transmit_FS()  (телеметрия)
-                                            task_console ──► CDC_Transmit_FS() (ответы)
+                                        task_microros / task_console ◄──┘
+                                        task_microros / task_debug ──► CDC_Transmit_FS()
 ```
 
 ---
@@ -226,23 +223,19 @@ Serial Monitor ──USB──► OTG_FS_IRQ ──► CDC_Receive_FS()
 
 ```c
 /* Физика */
-#define ROBOT_WHEEL_RADIUS   0.0877f  // измерить штангенциркулем [м]
-#define ROBOT_TRACK_WIDTH    0.526f   // между серединами гусениц [м]
+#define ROBOT_WHEEL_RADIUS   0.0877f  // радиус звёздочки [м]
+#define ROBOT_TRACK_WIDTH    0.526f   // полная колея [м]
 
-/* Энкодеры */
-#define ENCODER_PPR          4096U    // TI12 режим: 1024 PPR × 4 = 4096 CPR
-
-/* PID */
-#define PID_KP               1.5f
-#define PID_KI               0.1f
-#define PID_KD               0.05f
+/* PID (сейчас open-loop, KI/KD = 0) */
+#define PID_KP               0.3f
+#define PID_KI               0.0f
+#define PID_KD               0.0f
 
 /* Safety */
 #define CMD_TIMEOUT_MS       500U     // стоп при обрыве связи [мс]
 
 /* IMU */
 #define IMU_SMPLRT_DIV       1U       // 500 Гц при DLPF=3
-#define IMU_I2C_TIMEOUT_MS   1U       // < периода задачи 2 мс
 
 /* Отладочный режим */
 /* #define DEBUG_MODE */
@@ -252,13 +245,23 @@ Serial Monitor ──USB──► OTG_FS_IRQ ──► CDC_Receive_FS()
 
 ## Использование памяти
 
-| | Значение |
-|---|---|
-| RAM | 51.2% (67 КБ / 131 КБ) |
-| Flash | 10.6% (111 КБ / 1 МБ) |
-| FreeRTOS Heap | 30 КБ |
-| USB буферы | 2 × 512 Б |
-| RX ring | 512 Б |
+| Режим | RAM | Flash |
+|---|---|---|
+| DEBUG_MODE | 53% (69 КБ / 131 КБ) | 4.1% (43 КБ / 1 МБ) |
+| micro-ROS | 74.5% (97 КБ / 131 КБ) | 10.5% (110 КБ / 1 МБ) |
+
+---
+
+## Подключение энкодеров (в будущем)
+
+1. Перенести левый LPWM с **PA7** (TIM3_CH2) на **PB10** (TIM2_CH3, AF1)
+2. В `include/robot_config.h` обновить:
+   ```c
+   #define MOTOR_LEFT_CH_REV    TIM_CHANNEL_3   /* PB10, TIM2 */
+   #define MOTOR_LEFT_CCR_REV   (TIM2->CCR3)
+   ```
+3. В `src/main.c` переключить `MX_TIM3_Init()` обратно в encoder mode (PA6/PA7)
+4. В `src/freertos_app.c` раскомментировать `encoder_init` и переключить KF на `kf_vel_update` / `kf_yaw_update`
 
 ---
 
