@@ -49,10 +49,8 @@ ros2 run micro_ros_agent micro_ros_agent serial --dev /dev/ttyACM0
 ```bash
 ros2 topic list
 ros2 topic echo /d_grape/velocity
-ros2 topic pub /d_grape/wheel_cmd geometry_msgs/msg/Vector3 "{x: 0.3, y: -0.3}"
+ros2 topic pub /d_grape/wheel_cmd geometry_msgs/msg/Vector3 "{x: 0.3, y: 0.3}"
 ```
-
-> ⚠️ Правый мотор стоит **физически инвертированно** — для движения вперёд посылай `x = +v, y = -v`.
 
 ### Отладочный режим (без ROS)
 

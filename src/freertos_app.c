@@ -281,8 +281,8 @@ static void task_robot(void *arg)
         float cmd_right = g_cmd_right_mps;
         __set_PRIMASK(primask);
 
-        motor_velocity_update(&g_motor_left,  cmd_left,  dt);
-        motor_velocity_update(&g_motor_right, cmd_right, dt);
+        motor_velocity_update(&g_motor_left,  cmd_left,   dt);
+        motor_velocity_update(&g_motor_right, -cmd_right, dt); /* правый мотор стоит инвертированно */
 
         /* 6. LED */
         static uint8_t hb_cnt = 0U;
