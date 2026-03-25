@@ -13,7 +13,6 @@ extern TIM_HandleTypeDef htim2;   /* PWM  гусеницы          */
 extern TIM_HandleTypeDef htim3;   /* Encoder левый          */
 extern TIM_HandleTypeDef htim4;   /* Encoder правый         */
 extern TIM_HandleTypeDef htim5;   /* Encoder лыжи           */
-extern TIM_HandleTypeDef htim6;   /* HAL timebase           */
 extern I2C_HandleTypeDef hi2c1;   /* MPU-6050               */
 
 /* ── Error handler ──────────────────────────────────────────*/

@@ -6,14 +6,14 @@
 #include "robot_config.h"
 #include "cmsis_os2.h"
 #include "freertos_app.h"
+#include "usb_device.h"  /* MX_USB_DEVICE_Init */
 
 /* ── HAL handles ────────────────────────────────────────────*/
 TIM_HandleTypeDef htim1;   /* PWM лыжи      PA8  */
 TIM_HandleTypeDef htim2;   /* PWM моторы    PA15, PB3 */
-TIM_HandleTypeDef htim3;   /* Encoder левый PA6/PA7 */
+TIM_HandleTypeDef htim3;   /* PWM левый LPWM PA7 (TIM3_CH2) */
 TIM_HandleTypeDef htim4;   /* Encoder правый PB6/PB7 */
 TIM_HandleTypeDef htim5;   /* Encoder лыжи  PA0/PA1 */
-TIM_HandleTypeDef htim6;   /* HAL timebase  */
 I2C_HandleTypeDef hi2c1;   /* MPU-6050      PB8/PB9 */
 
 /* ── Прототипы ──────────────────────────────────────────────*/
@@ -24,31 +24,39 @@ static void MX_TIM2_Init(void);
 static void MX_TIM3_Init(void);
 static void MX_TIM4_Init(void);
 static void MX_TIM5_Init(void);
-static void MX_TIM6_Init(void);
 static void MX_I2C1_Init(void);
-static void MX_USB_DEVICE_Init(void);
+/* MX_USB_DEVICE_Init объявлена в usb_device.h */
 
 /* ── Точка входа ────────────────────────────────────────────*/
 int main(void)
 {
     HAL_Init();
-    SystemClock_Config();   /* 168 МГц */
+    SystemClock_Config();
+    MX_GPIO_Init();
 
-    MX_GPIO_Init();         /* DIR пины PD0/PD1/PD2, LED PD12..15 */
-    MX_TIM1_Init();         /* PWM лыжи 20 кГц */
-    MX_TIM2_Init();         /* PWM моторы 20 кГц */
-    MX_TIM3_Init();         /* Encoder левый */
-    MX_TIM4_Init();         /* Encoder правый */
-    MX_TIM5_Init();         /* Encoder лыжи */
-    MX_TIM6_Init();         /* HAL timebase 1 кГц */
-    MX_I2C1_Init();         /* MPU-6050 400 кГц */
-    MX_USB_DEVICE_Init();   /* CDC для micro-ROS */
+    /* Self-test */
+    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12|GPIO_PIN_13|GPIO_PIN_14|GPIO_PIN_15, GPIO_PIN_SET);
+    HAL_GPIO_WritePin(GPIOE, GPIO_PIN_1, GPIO_PIN_SET);
+    for (volatile uint32_t i = 0; i < 2000000UL; i++) {}
+    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12|GPIO_PIN_13|GPIO_PIN_14|GPIO_PIN_15, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(GPIOE, GPIO_PIN_1, GPIO_PIN_RESET);
 
-    freertos_app_init();    /* Задачи + аппаратура */
+    MX_TIM1_Init();
+    MX_TIM2_Init();
+    MX_TIM3_Init();
+    MX_TIM4_Init();
+    MX_TIM5_Init();
+    MX_I2C1_Init();
+    /* MX_USB_DEVICE_Init вызывается позже внутри задачи когда нужен USB */
+
+    osKernelInitialize();
+    freertos_app_init();
     osKernelStart();
 
-    /* Сюда не доходим */
-    for (;;) {}
+    while (1) {
+        HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_14);
+        for (volatile uint32_t i = 0; i < 200000UL; i++) {}
+    }
 }
 
 /* ── Тактирование 168 МГц ───────────────────────────────────
@@ -86,17 +94,29 @@ static void SystemClock_Config(void)
 static void MX_GPIO_Init(void)
 {
     __HAL_RCC_GPIOD_CLK_ENABLE();
+    __HAL_RCC_GPIOE_CLK_ENABLE();
 
     GPIO_InitTypeDef gpio = {0};
     gpio.Mode  = GPIO_MODE_OUTPUT_PP;
     gpio.Pull  = GPIO_NOPULL;
     gpio.Speed = GPIO_SPEED_FREQ_LOW;
-    gpio.Pin   = MOTOR_LEFT_DIR_PIN | MOTOR_RIGHT_DIR_PIN | MOTOR_SKIS_DIR_PIN;
+
+    /* DIR лыжи (PD2). PD0/PD1 убраны — BTS7960B не использует DIR. */
+    gpio.Pin = MOTOR_SKIS_DIR_PIN;
     HAL_GPIO_Init(GPIOD, &gpio);
 
-    /* Встроенные LED (PD12..15) для отладки */
+    /* LED PD12..15 */
     gpio.Pin = GPIO_PIN_12 | GPIO_PIN_13 | GPIO_PIN_14 | GPIO_PIN_15;
     HAL_GPIO_Init(GPIOD, &gpio);
+
+    /* LED PE1 — авария */
+    gpio.Pin = GPIO_PIN_1;
+    HAL_GPIO_Init(GPIOE, &gpio);
+
+    /* Все LED выключены при старте */
+    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12|GPIO_PIN_13|GPIO_PIN_14|GPIO_PIN_15,
+                      GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(GPIOE, GPIO_PIN_1, GPIO_PIN_RESET);
 }
 
 /* ── TIM1: PWM лыжи, PA8, AF1, 20 кГц ──────────────────────
@@ -132,7 +152,11 @@ static void MX_TIM1_Init(void)
     HAL_TIM_PWM_ConfigChannel(&htim1, &oc, TIM_CHANNEL_1);
 }
 
-/* ── TIM2: PWM моторы, PA15/PB3, AF1, 20 кГц ───────────────
+/* ── TIM2: PWM моторы, 20 кГц ───────────────────────────────
+ *  CH1 PA15 AF1 — левый  RPWM (вперёд)
+ *  CH2 PB3  AF1 — правый RPWM (вперёд)
+ *  CH4 PB11 AF1 — правый LPWM (назад)
+ *
  *  APB1 TIM clock = 84 МГц
  *  PSC=0, ARR=4199 → f = 84 000 000 / (0+1) / (4199+1) = 20 000 Гц
  * ────────────────────────────────────────────────────────── */
@@ -147,9 +171,9 @@ static void MX_TIM2_Init(void)
     gpio.Pull      = GPIO_NOPULL;
     gpio.Speed     = GPIO_SPEED_FREQ_HIGH;
     gpio.Alternate = GPIO_AF1_TIM2;
-    gpio.Pin       = GPIO_PIN_15;
+    gpio.Pin       = GPIO_PIN_15;                    /* PA15 — CH1 */
     HAL_GPIO_Init(GPIOA, &gpio);
-    gpio.Pin       = GPIO_PIN_3;
+    gpio.Pin       = GPIO_PIN_3 | GPIO_PIN_11;       /* PB3 — CH2, PB11 — CH4 */
     HAL_GPIO_Init(GPIOB, &gpio);
 
     htim2.Instance           = TIM2;
@@ -166,18 +190,30 @@ static void MX_TIM2_Init(void)
     oc.OCFastMode = TIM_OCFAST_DISABLE;
     HAL_TIM_PWM_ConfigChannel(&htim2, &oc, TIM_CHANNEL_1);
     HAL_TIM_PWM_ConfigChannel(&htim2, &oc, TIM_CHANNEL_2);
+    HAL_TIM_PWM_ConfigChannel(&htim2, &oc, TIM_CHANNEL_4);
+
+    /* Запускаем все каналы напрямую через регистры —
+     * HAL_TIM_PWM_Start блокирует handle после первого вызова
+     * и CH2/CH4 не стартуют на том же htim. */
+    TIM2->CCER |= TIM_CCER_CC1E | TIM_CCER_CC2E | TIM_CCER_CC4E;
+    TIM2->CR1  |= TIM_CR1_CEN;
 }
 
-/* ── TIM3: Encoder левый, PA6/PA7, AF2 ─────────────────────*/
+/* ── TIM3_CH2: левый LPWM (назад) → PA7, AF2, 20 кГц ───────
+ *
+ *  ⚠️ При подключении энкодеров: TIM3 нужно будет переключить
+ *     в encoder mode (PA6=A, PA7=B). Тогда левый LPWM перенести
+ *     на PB10 (TIM2_CH3, AF1). Пока энкодеров нет — TIM3 = PWM.
+ * ────────────────────────────────────────────────────────── */
 static void MX_TIM3_Init(void)
 {
     __HAL_RCC_TIM3_CLK_ENABLE();
-    __HAL_RCC_GPIOA_CLK_ENABLE();
+    /* GPIOA уже включён в MX_TIM2_Init */
 
     GPIO_InitTypeDef gpio = {0};
-    gpio.Pin       = GPIO_PIN_6 | GPIO_PIN_7;
+    gpio.Pin       = GPIO_PIN_7;
     gpio.Mode      = GPIO_MODE_AF_PP;
-    gpio.Pull      = GPIO_PULLUP;
+    gpio.Pull      = GPIO_NOPULL;
     gpio.Speed     = GPIO_SPEED_FREQ_HIGH;
     gpio.Alternate = GPIO_AF2_TIM3;
     HAL_GPIO_Init(GPIOA, &gpio);
@@ -185,19 +221,17 @@ static void MX_TIM3_Init(void)
     htim3.Instance           = TIM3;
     htim3.Init.Prescaler     = 0;
     htim3.Init.CounterMode   = TIM_COUNTERMODE_UP;
-    htim3.Init.Period        = ENCODER_TIMER_PERIOD;
+    htim3.Init.Period        = 4199;   /* 20 кГц, синхронно с TIM2 */
     htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-    HAL_TIM_Encoder_Init(&htim3, &(TIM_Encoder_InitTypeDef){
-        .EncoderMode  = TIM_ENCODERMODE_TI12,
-        .IC1Polarity  = TIM_ICPOLARITY_RISING,
-        .IC1Selection = TIM_ICSELECTION_DIRECTTI,
-        .IC1Prescaler = TIM_ICPSC_DIV1,
-        .IC1Filter    = 4,
-        .IC2Polarity  = TIM_ICPOLARITY_RISING,
-        .IC2Selection = TIM_ICSELECTION_DIRECTTI,
-        .IC2Prescaler = TIM_ICPSC_DIV1,
-        .IC2Filter    = 4,
-    });
+    HAL_TIM_PWM_Init(&htim3);
+
+    TIM_OC_InitTypeDef oc = {0};
+    oc.OCMode     = TIM_OCMODE_PWM1;
+    oc.Pulse      = 0;
+    oc.OCPolarity = TIM_OCPOLARITY_HIGH;
+    oc.OCFastMode = TIM_OCFAST_DISABLE;
+    HAL_TIM_PWM_ConfigChannel(&htim3, &oc, TIM_CHANNEL_2);
+    HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_2);
 }
 
 /* ── TIM4: Encoder правый, PB6/PB7, AF2 ────────────────────*/
@@ -264,20 +298,6 @@ static void MX_TIM5_Init(void)
     });
 }
 
-/* ── TIM6: HAL timebase 1 кГц ──────────────────────────────*/
-static void MX_TIM6_Init(void)
-{
-    __HAL_RCC_TIM6_CLK_ENABLE();
-    htim6.Instance         = TIM6;
-    htim6.Init.Prescaler   = (uint32_t)((SystemCoreClock / 2) / 1000000U) - 1;
-    htim6.Init.Period      = (1000000U / 1000U) - 1; /* 1 кГц */
-    htim6.Init.CounterMode = TIM_COUNTERMODE_UP;
-    HAL_TIM_Base_Init(&htim6);
-    HAL_TIM_Base_Start_IT(&htim6);
-    HAL_NVIC_SetPriority(TIM6_DAC_IRQn, 0, 0);
-    HAL_NVIC_EnableIRQ(TIM6_DAC_IRQn);
-}
-
 /* ── I2C1: MPU-6050, PB8/PB9, 400 кГц ─────────────────────
  *  Fast mode: CCR = 42 МГц / (400 кГц * 3) = 35
  *  Trise = 42 МГц * 300нс + 1 = 13
@@ -306,14 +326,4 @@ static void MX_I2C1_Init(void)
     HAL_I2C_Init(&hi2c1);
 }
 
-/* ── USB CDC (micro-ROS transport) ──────────────────────────*/
-static void MX_USB_DEVICE_Init(void)
-{
-    /* Реализация зависит от micro_ros_stm32cubemx_utils.
-     * Файлы usb_device.c / usb_transport.c берутся из репозитория.
-     * Здесь — placeholder. */
-    extern void MX_USB_DEVICE_Init_impl(void);
-    MX_USB_DEVICE_Init_impl();
-}
-/* ── USB stub — подключается с micro-ROS ──────────────────── */
-void MX_USB_DEVICE_Init_impl(void) {}
+/* MX_USB_DEVICE_Init реализована в lib/usb_cdc/usb_device.c */

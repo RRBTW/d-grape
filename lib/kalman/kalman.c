@@ -97,12 +97,39 @@ float kf_vel_update(KF2_t *kf, float ax, float v_enc)
     kf->P[1][0] = p10_pred - k1 * p00_pred;
     kf->P[1][1] = p11_pred - k1 * p01_pred;
 
-    /* Баг 7: P должна оставаться симметричной — принудительно выравниваем
-     * P[0][1] и P[1][0] чтобы подавить накопление численной асимметрии */
+    /* P должна оставаться симметричной и положительно определённой */
     float p01_sym = (kf->P[0][1] + kf->P[1][0]) * 0.5f;
     kf->P[0][1] = p01_sym;
     kf->P[1][0] = p01_sym;
+    if (kf->P[0][0] < 1e-6f) kf->P[0][0] = 1e-6f;
+    if (kf->P[1][1] < 1e-6f) kf->P[1][1] = 1e-6f;
 
+    return kf->x[0];
+}
+
+/* ─────────────────────────────────────────────────────────── */
+/*  KF_VEL — predict only (нет энкодера)                       */
+/* ─────────────────────────────────────────────────────────── */
+float kf_vel_predict_only(KF2_t *kf, float ax)
+{
+    const float dt = kf->dt;
+
+    float x0_pred = kf->x[0] + (ax - kf->x[1]) * dt;
+    float x1_pred = kf->x[1];
+
+    float p00 = kf->P[0][0], p01 = kf->P[0][1];
+    float p10 = kf->P[1][0], p11 = kf->P[1][1];
+
+    kf->P[0][0] = p00 - dt*(p01 + p10) + dt*dt*p11 + kf->q0;
+    kf->P[0][1] = p01 - dt*p11;
+    kf->P[1][0] = p10 - dt*p11;
+    kf->P[1][1] = p11 + kf->q1;
+
+    if (kf->P[0][0] < 1e-6f) kf->P[0][0] = 1e-6f;
+    if (kf->P[1][1] < 1e-6f) kf->P[1][1] = 1e-6f;
+
+    kf->x[0] = x0_pred;
+    kf->x[1] = x1_pred;
     return kf->x[0];
 }
 
@@ -177,10 +204,12 @@ float kf_yaw_update(KF2_t *kf, float gz, float omega_enc,
     kf->P[1][0] = p10_pred - k1_2 * p00_pred;
     kf->P[1][1] = p11_pred - k1_2 * p01_pred;
 
-    /* Симметризация P */
+    /* Симметризация P и клипинг диагонали */
     float p01_sym = (kf->P[0][1] + kf->P[1][0]) * 0.5f;
     kf->P[0][1] = p01_sym;
     kf->P[1][0] = p01_sym;
+    if (kf->P[0][0] < 1e-6f) kf->P[0][0] = 1e-6f;
+    if (kf->P[1][1] < 1e-6f) kf->P[1][1] = 1e-6f;
 
     kf->x[0] = x0_upd;
     kf->x[1] = x1_upd;
@@ -189,6 +218,26 @@ float kf_yaw_update(KF2_t *kf, float gz, float omega_enc,
     (void)r_gyro;
     (void)dt;
 
+    return kf->x[0];
+}
+
+/* ─────────────────────────────────────────────────────────── */
+/*  KF_YAW — predict only (нет энкодера)                       */
+/* ─────────────────────────────────────────────────────────── */
+float kf_yaw_predict_only(KF2_t *kf, float gz)
+{
+    /* gz уже учитывается как вход (omega = gz - bias) */
+    float x0_pred = gz - kf->x[1];
+    /* P_pred = P + Q (F=I в yaw модели) */
+    kf->P[0][0] += kf->q0;
+    kf->P[1][1] += kf->q1;
+    /* Симметризация off-diagonal чтобы не накапливался численный дрейф */
+    float p01_sym = (kf->P[0][1] + kf->P[1][0]) * 0.5f;
+    kf->P[0][1] = p01_sym;
+    kf->P[1][0] = p01_sym;
+    if (kf->P[0][0] < 1e-6f) kf->P[0][0] = 1e-6f;
+    if (kf->P[1][1] < 1e-6f) kf->P[1][1] = 1e-6f;
+    kf->x[0] = x0_pred;
     return kf->x[0];
 }
 

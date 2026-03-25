@@ -64,6 +64,11 @@ typedef struct {
     float cmd_left_mps;
     float cmd_right_mps;
     uint32_t last_cmd_ms;      /* когда пришла последняя команда   */
+
+    /* USB CDC состояние */
+    uint8_t  usb_configured;   /* 1 = USBD_STATE_CONFIGURED        */
+    uint32_t usb_tx_errors;    /* сколько раз CDC_Transmit вернул BUSY/ERROR */
+    uint32_t usb_rx_total;     /* всего принято байт               */
 } DebugSnapshot_t;
 
 /* ── API ────────────────────────────────────────────────────*/
@@ -87,5 +92,16 @@ void debug_print(const DebugSnapshot_t *s);
  * @param  msg  строка с завершающим \0
  */
 void debug_log(const char *msg);
+
+/**
+ * @brief  Баннер при старте: версия прошивки, конфиг железа,
+ *         параметры PID, тактирование, UID процессора.
+ *         Вызвать один раз из task_debug до основного цикла.
+ */
+void debug_print_startup(void);
+
+/* Счётчики для заполнения USB полей снимка состояния */
+extern uint32_t          s_tx_errors_debug;
+extern volatile uint32_t rx_total_debug;
 
 #endif /* DEBUG_MODE */

@@ -34,6 +34,7 @@
 
 #include "usb_device.h"
 
+
 /* HAL handles */
 extern TIM_HandleTypeDef htim1, htim2, htim3, htim4, htim5;
 extern I2C_HandleTypeDef hi2c1;
@@ -52,42 +53,24 @@ static osMutexId_t       g_imu_mutex;
 static KF_Output_t       g_kf_out;
 static osMutexId_t       g_kf_mutex;
 
-static volatile float    g_enc_left_mps  = 0.0f;
-static volatile float    g_enc_right_mps = 0.0f;
-
 static osThreadId_t      g_watchdog_handle;
 
 /* ══════════════════════════════════════════════════════════ */
 /*  АППАРАТНЫЕ ОБЪЕКТЫ                                        */
 /* ══════════════════════════════════════════════════════════ */
 
-Encoder_t g_enc_left  = { .htim = &htim3 };
-Encoder_t g_enc_right = { .htim = &htim4 };
+/* Энкодеры не подключены — структуры нулевые.
+ * Когда подключат: g_enc_left = { .htim = &htim3 } (TIM3, PA6/PA7),
+ *                  g_enc_right = { .htim = &htim4 } (TIM4, PB6/PB7),
+ *                  перенести левый LPWM с PA7 на PB10 (TIM2_CH3). */
+Encoder_t g_enc_left  = {0};
+Encoder_t g_enc_right = {0};
 
-Motor_t g_motor_left = {
-    .htim     = &htim2,
-    .channel  = MOTOR_LEFT_CHANNEL,
-    .ccr      = &MOTOR_LEFT_CCR,
-    .arr      = &TIM2->ARR,
-    .dir_port = MOTOR_LEFT_DIR_PORT,
-    .dir_pin  = MOTOR_LEFT_DIR_PIN,
-};
-Motor_t g_motor_right = {
-    .htim     = &htim2,
-    .channel  = MOTOR_RIGHT_CHANNEL,
-    .ccr      = &MOTOR_RIGHT_CCR,
-    .arr      = &TIM2->ARR,
-    .dir_port = MOTOR_RIGHT_DIR_PORT,
-    .dir_pin  = MOTOR_RIGHT_DIR_PIN,
-};
-Motor_t g_motor_skis = {
-    .htim     = &htim1,
-    .channel  = MOTOR_SKIS_CHANNEL,
-    .ccr      = &MOTOR_SKIS_CCR,
-    .arr      = &TIM1->ARR,
-    .dir_port = MOTOR_SKIS_DIR_PORT,
-    .dir_pin  = MOTOR_SKIS_DIR_PIN,
-};
+/* Моторы инициализируются runtime в hw_init() —
+ * статический инициализатор не может использовать адреса регистров. */
+Motor_t g_motor_left  = {0};
+Motor_t g_motor_right = {0};
+Motor_t g_motor_skis  = {0};
 
 static KF2_t g_kf_vel;
 static KF2_t g_kf_yaw;
@@ -212,6 +195,15 @@ static void task_imu(void *arg)
 {
     (void)arg;
     uint32_t tick = osKernelGetTickCount();
+    uint16_t imu_err_count = 0U;
+
+    /* Инициализируем IMU здесь — после старта планировщика.
+     * HAL_Delay внутри imu_init работает корректно только когда
+     * SysTick не захвачен FreeRTOS до osKernelStart. */
+    imu_init(&hi2c1);
+
+    /* LD4 зелёный мигает медленно пока IMU не ответил */
+    HAL_GPIO_WritePin(LED_IMU_PORT, LED_IMU_PIN, GPIO_PIN_RESET);
 
     for (;;) {
         osDelayUntil(tick += TASK_IMU_PERIOD_MS);
@@ -221,6 +213,15 @@ static void task_imu(void *arg)
             osMutexAcquire(g_imu_mutex, osWaitForever);
             g_imu_raw = raw;
             osMutexRelease(g_imu_mutex);
+            imu_err_count = 0U;
+            HAL_GPIO_WritePin(LED_IMU_PORT, LED_IMU_PIN, GPIO_PIN_SET);
+        } else {
+            imu_err_count++;
+            /* Мигаем раз в 500 мс = 250 тиков по 2 мс */
+            if (imu_err_count >= 250U) {
+                HAL_GPIO_TogglePin(LED_IMU_PORT, LED_IMU_PIN);
+                imu_err_count = 0U;
+            }
         }
     }
 }
@@ -237,17 +238,7 @@ static void task_robot(void *arg)
         osDelayUntil(tick += TASK_ROBOT_PERIOD_MS);
         const float dt = PID_DT_S;
 
-        /* 1. Энкодеры */
-        encoder_update(&g_enc_left,  dt);
-        encoder_update(&g_enc_right, dt);
-
-        float v_left  = g_enc_left.speed_mps;
-        float v_right = g_enc_right.speed_mps;
-        float v_enc   = (v_left + v_right) * 0.5f;
-        float omega_enc = (v_right - v_left) / ROBOT_TRACK_WIDTH;
-
-        g_enc_left_mps  = v_left;
-        g_enc_right_mps = v_right;
+        /* 1. Энкодеры не подключены — скорости нулевые */
 
         /* 2. Читаем IMU */
         IMU_Raw_t imu;
@@ -255,20 +246,21 @@ static void task_robot(void *arg)
         imu = g_imu_raw;
         osMutexRelease(g_imu_mutex);
 
-        /* 3. Фильтр Калмана */
-        float vel_fused   = kf_vel_update(&g_kf_vel, imu.ax, v_enc);
-        float omega_fused = kf_yaw_update(&g_kf_yaw, imu.gz, omega_enc,
-                                          KF_YAW_R_GYRO, KF_YAW_R_ENC_W);
+        /* 3. Фильтр Калмана — predict only (нет энкодеров) */
+        float vel_fused   = kf_vel_predict_only(&g_kf_vel, imu.ax);
+        float omega_fused = kf_yaw_predict_only(&g_kf_yaw, imu.gz);
 
         osMutexAcquire(g_kf_mutex, osWaitForever);
         g_kf_out.velocity_mps = vel_fused;
         g_kf_out.omega_rads   = omega_fused;
         g_kf_out.accel_bias   = g_kf_vel.x[1];
         g_kf_out.gyro_bias    = g_kf_yaw.x[1];
+        g_kf_out.kf_p00_vel   = g_kf_vel.P[0][0];
+        g_kf_out.kf_p00_yaw   = g_kf_yaw.P[0][0];
         g_kf_out.valid        = imu.valid;
         osMutexRelease(g_kf_mutex);
 
-        /* 4. Safety timeout — читаем g_last_cmd_ms атомарно */
+        /* 4. Safety timeout */
         uint32_t primask = __get_PRIMASK();
         __disable_irq();
         uint32_t last_cmd = g_last_cmd_ms;
@@ -282,7 +274,7 @@ static void task_robot(void *arg)
             __set_PRIMASK(primask);
         }
 
-        /* 5. PID velocity control — читаем команды атомарно */
+        /* 5. PID */
         primask = __get_PRIMASK();
         __disable_irq();
         float cmd_left  = g_cmd_left_mps;
@@ -292,7 +284,17 @@ static void task_robot(void *arg)
         motor_velocity_update(&g_motor_left,  cmd_left,  dt);
         motor_velocity_update(&g_motor_right, cmd_right, dt);
 
-        /* 6. Watchdog ping */
+        /* 6. LED */
+        static uint8_t hb_cnt = 0U;
+        if (++hb_cnt >= 50U) {
+            HAL_GPIO_TogglePin(LED_HEARTBEAT_PORT, LED_HEARTBEAT_PIN);
+            hb_cnt = 0U;
+        }
+        HAL_GPIO_WritePin(LED_MOTORS_PORT, LED_MOTORS_PIN,
+            (cmd_left != 0.0f || cmd_right != 0.0f)
+                ? GPIO_PIN_SET : GPIO_PIN_RESET);
+
+        /* 7. Watchdog ping */
         osThreadFlagsSet(g_watchdog_handle, 0x02U);
     }
 }
@@ -305,19 +307,51 @@ static void task_microros(void *arg)
 {
     (void)arg;
 
+    /* Инициализируем USB CDC — без этого transport не работает.
+     * Вызов здесь (после старта планировщика) обязателен: стек USB
+     * использует прерывания, которые должны быть настроены до
+     * первого обращения к USB OTG FS. */
+    MX_USB_DEVICE_Init();
+
+    /* Даём хосту время перечислить устройство (CDC enumeration) */
+    osDelay(500);
+
+    /* LD6 синий — мигаем пока ищем агента */
+    HAL_GPIO_WritePin(LED_COMM_PORT, LED_COMM_PIN, GPIO_PIN_RESET);
+
     while (!ros_init()) {
-        osDelay(1000);
+        HAL_GPIO_TogglePin(LED_COMM_PORT, LED_COMM_PIN);
+        osDelay(500);
     }
 
+    /* Агент найден — LD6 горит постоянно */
+    HAL_GPIO_WritePin(LED_COMM_PORT, LED_COMM_PIN, GPIO_PIN_SET);
+
     uint32_t tick = osKernelGetTickCount();
+    uint16_t ping_cnt = 0U;
 
     for (;;) {
         osDelayUntil(tick += TASK_MICROROS_PERIOD_MS);
 
-        /* Получаем wheel_cmd */
+        /* Раз в ~2 с проверяем связь с агентом */
+        if (++ping_cnt >= (2000U / TASK_MICROROS_PERIOD_MS)) {
+            ping_cnt = 0U;
+            if (rmw_uros_ping_agent(MICROROS_AGENT_TIMEOUT_MS,
+                                    MICROROS_AGENT_ATTEMPTS) != RMW_RET_OK) {
+                HAL_GPIO_WritePin(LED_COMM_PORT, LED_COMM_PIN, GPIO_PIN_RESET);
+                while (!ros_init()) {
+                    HAL_GPIO_TogglePin(LED_COMM_PORT, LED_COMM_PIN);
+                    osDelay(500);
+                }
+                HAL_GPIO_WritePin(LED_COMM_PORT, LED_COMM_PIN, GPIO_PIN_SET);
+                tick = osKernelGetTickCount();
+                ping_cnt = 0U;
+                continue;
+            }
+        }
+
         rclc_executor_spin_some(&g_executor, RCL_MS_TO_NS(5));
 
-        /* Читаем KF output */
         KF_Output_t kf;
         osMutexAcquire(g_kf_mutex, osWaitForever);
         kf = g_kf_out;
@@ -334,8 +368,8 @@ static void task_microros(void *arg)
         g_msg_imu.angular_velocity.x               = 0.0f;
         g_msg_imu.angular_velocity.y               = 0.0f;
         g_msg_imu.angular_velocity.z               = kf.omega_rads;
-        g_msg_imu.linear_acceleration_covariance[0] = g_kf_vel.P[0][0];
-        g_msg_imu.angular_velocity_covariance[8]    = g_kf_yaw.P[0][0];
+        g_msg_imu.linear_acceleration_covariance[0] = kf.kf_p00_vel;
+        g_msg_imu.angular_velocity_covariance[8]    = kf.kf_p00_yaw;
         RCL_PUB(&g_pub_imu, &g_msg_imu);
 
         g_msg_vel.x = kf.velocity_mps;
@@ -356,10 +390,11 @@ static void task_watchdog(void *arg)
     (void)arg;
 
     for (;;) {
-        uint32_t flags = osThreadFlagsWait(0x02U, osFlagsWaitAny, 50U);
+        uint32_t flags = osThreadFlagsWait(0x02U, osFlagsWaitAny, 200U);
 
         if (flags == osFlagsErrorTimeout) {
-            /* task_robot завис — аварийная остановка и ребут */
+            /* task_robot завис — LD7 красный, аварийная остановка, ребут */
+            HAL_GPIO_WritePin(LED_ERROR_PORT, LED_ERROR_PIN, GPIO_PIN_SET);
             motor_stop(&g_motor_left);
             motor_stop(&g_motor_right);
             motor_stop(&g_motor_skis);
@@ -374,26 +409,47 @@ static void task_watchdog(void *arg)
 /* ══════════════════════════════════════════════════════════ */
 static void hw_init(void)
 {
-    encoder_init(&g_enc_left);
-    encoder_init(&g_enc_right);
+    /* ── Моторы BTS7960B: runtime инициализация ─────────────*/
+    /* Левый: PA15(TIM2_CH1)=RPWM, PA7(TIM3_CH2)=LPWM */
+    g_motor_left.htim_fwd = &htim2;  g_motor_left.ch_fwd  = MOTOR_LEFT_CH_FWD;
+    g_motor_left.ccr_fwd  = &MOTOR_LEFT_CCR_FWD;
+    g_motor_left.htim_rev = &htim3;  g_motor_left.ch_rev  = MOTOR_LEFT_CH_REV;
+    g_motor_left.ccr_rev  = &MOTOR_LEFT_CCR_REV;
+    g_motor_left.arr      = &TIM2->ARR;
 
-    motor_init(&g_motor_left,  &g_enc_left,  PID_DT_S);
-    motor_init(&g_motor_right, &g_enc_right, PID_DT_S);
-    motor_init(&g_motor_skis,  NULL,         PID_DT_S);
+    /* Правый: PB3(TIM2_CH2)=RPWM, PB11(TIM2_CH4)=LPWM */
+    g_motor_right.htim_fwd = &htim2;  g_motor_right.ch_fwd  = MOTOR_RIGHT_CH_FWD;
+    g_motor_right.ccr_fwd  = &MOTOR_RIGHT_CCR_FWD;
+    g_motor_right.htim_rev = &htim2;  g_motor_right.ch_rev  = MOTOR_RIGHT_CH_REV;
+    g_motor_right.ccr_rev  = &MOTOR_RIGHT_CCR_REV;
+    g_motor_right.arr      = &TIM2->ARR;
 
-    /* IMU: ошибка не фатальна — KF работает без IMU по энкодерам */
-    imu_init(&hi2c1);
+    /* Лыжи: TIM1_CH1 (одиночный ШИМ, REV = заглушка на тот же CCR) */
+    g_motor_skis.htim_fwd = &htim1;  g_motor_skis.ch_fwd  = MOTOR_SKIS_CHANNEL;
+    g_motor_skis.ccr_fwd  = &MOTOR_SKIS_CCR;
+    g_motor_skis.htim_rev = &htim1;  g_motor_skis.ch_rev  = MOTOR_SKIS_CHANNEL;
+    g_motor_skis.ccr_rev  = &MOTOR_SKIS_CCR;
+    g_motor_skis.arr      = &TIM1->ARR;
+
+    motor_init(&g_motor_left,  NULL, PID_DT_S);   /* enc=NULL: открытый контур */
+    motor_init(&g_motor_right, NULL, PID_DT_S);
+    motor_init(&g_motor_skis,  NULL, PID_DT_S);
+
+    /* Энкодеры не подключены — encoder_init не вызываем.
+     * Восстановить когда энкодеры будут подключены:
+     *   encoder_init(&g_enc_left);
+     *   encoder_init(&g_enc_right);
+     *   motor_init(&g_motor_left,  &g_enc_left,  PID_DT_S);
+     *   motor_init(&g_motor_right, &g_enc_right, PID_DT_S); */
+
+    /* imu_init(&hi2c1); — отключено: HAL_Delay зависает до старта планировщика */
 
     kf_vel_init(&g_kf_vel, PID_DT_S,
                 KF_VEL_Q_V, KF_VEL_Q_BA, KF_VEL_R_ENC);
 
     kf_yaw_init(&g_kf_yaw, PID_DT_S,
                 KF_YAW_Q_W, KF_YAW_Q_BG, KF_YAW_R_ENC_W);
-
-    pid_enable(&g_motor_left.pid);
-    pid_enable(&g_motor_right.pid);
-
-    MX_USB_DEVICE_Init();
+    /* imu_init вызывается внутри task_imu после старта планировщика */
 }
 
 /* ══════════════════════════════════════════════════════════ */
@@ -404,7 +460,38 @@ static void task_debug(void *arg)
 {
     (void)arg;
 
-    debug_log("\r\n*** D-Grape DEBUG MODE — micro-ROS disabled ***\r\n");
+    /* ── Шаг 1: инициализация USB CDC ──────────────────────
+     * В DEBUG_MODE task_microros не запускается, поэтому
+     * MX_USB_DEVICE_Init() нужно вызвать здесь. */
+    MX_USB_DEVICE_Init();
+
+    /* ── Шаг 2: ждём enumeration хостом ────────────────────
+     * Мигаем синим LED пока хост не сконфигурировал устройство.
+     * Если за 5 секунд не появилось — идём дальше всё равно. */
+    {
+        uint32_t start = HAL_GetTick();
+        uint32_t blink = start;
+        while ((HAL_GetTick() - start) < 5000U) {
+            if (hUsbDeviceFS.dev_state == USBD_STATE_CONFIGURED)
+                break;
+            if (HAL_GetTick() - blink >= 200U) {
+                HAL_GPIO_TogglePin(LED_COMM_PORT, LED_COMM_PIN);
+                blink = HAL_GetTick();
+            }
+            osDelay(10);
+        }
+    }
+
+    /* LD6 синий — горит постоянно если USB OK, мигает если нет */
+    HAL_GPIO_WritePin(LED_COMM_PORT, LED_COMM_PIN,
+        (hUsbDeviceFS.dev_state == USBD_STATE_CONFIGURED)
+            ? GPIO_PIN_SET : GPIO_PIN_RESET);
+
+    /* Пауза — хост открывает COM-порт */
+    osDelay(200);
+
+    /* ── Шаг 3: стартовый баннер ────────────────────── */
+    debug_print_startup();
 
     uint32_t tick = osKernelGetTickCount();
 
@@ -430,11 +517,11 @@ static void task_debug(void *arg)
         snap.temp_c    = imu.temp_c;
         snap.imu_valid = imu.valid;
 
-        /* Энкодеры — volatile, читаем атомарно */
-        snap.enc_left_mps    = g_enc_left_mps;
-        snap.enc_right_mps   = g_enc_right_mps;
-        snap.enc_left_dist_m  = g_enc_left.distance_m;
-        snap.enc_right_dist_m = g_enc_right.distance_m;
+        /* Энкодеры не подключены */
+        snap.enc_left_mps    = 0.0f;
+        snap.enc_right_mps   = 0.0f;
+        snap.enc_left_dist_m  = 0.0f;
+        snap.enc_right_dist_m = 0.0f;
 
         /* Kalman — под мьютексом */
         osMutexAcquire(g_kf_mutex, osWaitForever);
@@ -445,8 +532,8 @@ static void task_debug(void *arg)
         snap.kf_omega_rads = kf.omega_rads;
         snap.kf_accel_bias = kf.accel_bias;
         snap.kf_gyro_bias  = kf.gyro_bias;
-        snap.kf_p00_vel    = g_kf_vel.P[0][0];
-        snap.kf_p00_yaw    = g_kf_yaw.P[0][0];
+        snap.kf_p00_vel    = kf.kf_p00_vel;
+        snap.kf_p00_yaw    = kf.kf_p00_yaw;
 
         /* PID */
         snap.pid_setpoint_left  = g_motor_left.pid.setpoint;
@@ -463,6 +550,11 @@ static void task_debug(void *arg)
         snap.cmd_right_mps = g_cmd_right_mps;
         snap.last_cmd_ms   = g_last_cmd_ms;
         __set_PRIMASK(primask);
+
+        /* USB CDC статус */
+        snap.usb_configured = (hUsbDeviceFS.dev_state == USBD_STATE_CONFIGURED) ? 1U : 0U;
+        snap.usb_tx_errors  = s_tx_errors_debug;
+        snap.usb_rx_total   = rx_total_debug;
 
         debug_print(&snap);
     }
@@ -485,37 +577,52 @@ void freertos_app_init(void)
 #endif
 
     osThreadAttr_t attr = {0};
+    osThreadId_t   tid  = NULL;
 
     attr.name       = "imu";
     attr.stack_size = TASK_IMU_STACK;
     attr.priority   = TASK_IMU_PRIORITY;
-    osThreadNew(task_imu, NULL, &attr);
+    tid = osThreadNew(task_imu, NULL, &attr);
+    if (!tid) goto task_create_failed;
 
     attr.name       = "robot";
     attr.stack_size = TASK_ROBOT_STACK;
     attr.priority   = TASK_ROBOT_PRIORITY;
-    osThreadNew(task_robot, NULL, &attr);
+    tid = osThreadNew(task_robot, NULL, &attr);
+    if (!tid) goto task_create_failed;
 
 #ifdef DEBUG_MODE
-    /* В отладочном режиме — task_debug + task_console вместо task_microros */
     attr.name       = "debug";
     attr.stack_size = TASK_DEBUG_STACK;
     attr.priority   = TASK_DEBUG_PRIORITY;
-    osThreadNew(task_debug, NULL, &attr);
+    tid = osThreadNew(task_debug, NULL, &attr);
+    if (!tid) goto task_create_failed;
 
     attr.name       = "console";
     attr.stack_size = TASK_CONSOLE_STACK;
     attr.priority   = TASK_CONSOLE_PRIORITY;
-    osThreadNew(task_console, NULL, &attr);
+    tid = osThreadNew(task_console, NULL, &attr);
+    if (!tid) goto task_create_failed;
 #else
     attr.name       = "microros";
     attr.stack_size = TASK_MICROROS_STACK;
     attr.priority   = TASK_MICROROS_PRIORITY;
-    osThreadNew(task_microros, NULL, &attr);
+    tid = osThreadNew(task_microros, NULL, &attr);
+    if (!tid) goto task_create_failed;
 #endif
 
     attr.name       = "watchdog";
     attr.stack_size = TASK_WATCHDOG_STACK;
     attr.priority   = TASK_WATCHDOG_PRIORITY;
     g_watchdog_handle = osThreadNew(task_watchdog, NULL, &attr);
+    if (!g_watchdog_handle) goto task_create_failed;
+
+    return;
+
+task_create_failed:
+    while (1) {
+        HAL_GPIO_TogglePin(LED_HEARTBEAT_PORT, LED_HEARTBEAT_PIN);
+        HAL_GPIO_TogglePin(LED_ERROR_PORT,     LED_ERROR_PIN);
+        for (volatile uint32_t i = 0; i < 400000UL; i++) {}
+    }
 }

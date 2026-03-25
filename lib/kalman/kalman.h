@@ -61,6 +61,8 @@ typedef struct {
     float omega_rads;       /* KF2 выход: угловая скорость [рад/с] */
     float accel_bias;       /* оценка смещения акселерометра */
     float gyro_bias;        /* оценка смещения гироскопа */
+    float kf_p00_vel;       /* P[0][0] фильтра скорости (мера неопределённости) */
+    float kf_p00_yaw;       /* P[0][0] фильтра угловой скорости */
     uint8_t valid;
 } KF_Output_t;
 
@@ -113,6 +115,13 @@ void kf_yaw_init(KF2_t *kf, float dt, float q_w, float q_bias, float r);
  */
 float kf_yaw_update(KF2_t *kf, float gz, float omega_enc,
                     float r_gyro, float r_enc);
+
+/**
+ * @brief Только шаг предсказания, без коррекции измерением.
+ *        Использовать когда энкодер не подключён.
+ */
+float kf_vel_predict_only(KF2_t *kf, float ax);
+float kf_yaw_predict_only(KF2_t *kf, float gz);
 
 /**
  * @brief Сброс фильтра (при потере связи или остановке)

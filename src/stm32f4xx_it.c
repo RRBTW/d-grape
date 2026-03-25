@@ -14,13 +14,7 @@ void MemManage_Handler(void)  { while (1) {} }
 void BusFault_Handler(void)   { while (1) {} }
 void UsageFault_Handler(void) { while (1) {} }
 
-/* SVC, PendSV, SysTick — переопределены FreeRTOS через FreeRTOSConfig.h */
-
-/* ── TIM6 — HAL Timebase 1 кГц ─────────────────────────────*/
-void TIM6_DAC_IRQHandler(void)
-{
-    HAL_TIM_IRQHandler(&htim6);
-}
+/* SVC, PendSV, SysTick — определены в cmsis_os2.c и port.c (FreeRTOS) */
 
 /* ── USB OTG FS ─────────────────────────────────────────────
  * ────────────────────────────────────────────────────────── */

@@ -29,9 +29,12 @@ static int8_t CDC_Control_FS(uint8_t cmd, uint8_t *pbuf, uint16_t length)
     return USBD_OK;
 }
 
+__attribute__((weak)) void cdc_rx_hook(uint8_t *buf, uint32_t len)
+{ (void)buf; (void)len; }
+
 static int8_t CDC_Receive_FS(uint8_t *pbuf, uint32_t *pLen)
 {
-    microros_usb_recv_cb(pbuf, *pLen);
+    cdc_rx_hook(pbuf, *pLen);
     USBD_CDC_SetRxBuffer(&hUsbDeviceFS, UserRxBufferFS);
     USBD_CDC_ReceivePacket(&hUsbDeviceFS);
     return USBD_OK;

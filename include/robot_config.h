@@ -22,35 +22,35 @@
 #define ENCODER_RIGHT_TIM           TIM4
 #define ENCODER_SKIS_TIM            TIM5
 
-/* ── Таймеры PWM моторов ────────────────────────────────────
- *  Левая  → TIM2 CH1 PA15
- *  Правая → TIM2 CH2 PB3
- *  Лыжи   → TIM1 CH1 PA8
+/* ── Моторы BTS7960B (dual PWM: RPWM=вперёд, LPWM=назад) ───
+ *
+ *  Левый:   PA15 → TIM2_CH1 (RPWM),  PA7  → TIM3_CH2 (LPWM)
+ *  Правый:  PB3  → TIM2_CH2 (RPWM),  PB11 → TIM2_CH4 (LPWM)
+ *  Лыжи:    PA8  → TIM1_CH1 (одиночный ШИМ, без реверса)
+ *
+ *  ⚠️ При подключении энкодеров: перенести левый LPWM
+ *     с PA7 (TIM3_CH2) на PB10 (TIM2_CH3), чтобы TIM3 был
+ *     свободен для энкодера левого колеса (PA6=A, PA7=B).
  * ────────────────────────────────────────────────────────── */
-#define MOTOR_LEFT_TIM              TIM2
-#define MOTOR_LEFT_CHANNEL          TIM_CHANNEL_1
-#define MOTOR_LEFT_CCR              (TIM2->CCR1)
+#define MOTOR_LEFT_CH_FWD       TIM_CHANNEL_1   /* PA15, TIM2 */
+#define MOTOR_LEFT_CCR_FWD      (TIM2->CCR1)
+#define MOTOR_LEFT_CH_REV       TIM_CHANNEL_2   /* PA7,  TIM3 */
+#define MOTOR_LEFT_CCR_REV      (TIM3->CCR2)
 
-#define MOTOR_RIGHT_TIM             TIM2
-#define MOTOR_RIGHT_CHANNEL         TIM_CHANNEL_2
-#define MOTOR_RIGHT_CCR             (TIM2->CCR2)
+#define MOTOR_RIGHT_CH_FWD      TIM_CHANNEL_2   /* PB3,  TIM2 */
+#define MOTOR_RIGHT_CCR_FWD     (TIM2->CCR2)
+#define MOTOR_RIGHT_CH_REV      TIM_CHANNEL_4   /* PB11, TIM2 */
+#define MOTOR_RIGHT_CCR_REV     (TIM2->CCR4)
 
-#define MOTOR_SKIS_TIM              TIM1
-#define MOTOR_SKIS_CHANNEL          TIM_CHANNEL_1
-#define MOTOR_SKIS_CCR              (TIM1->CCR1)
-
-/* ── DIR пины ───────────────────────────────────────────────*/
-#define MOTOR_LEFT_DIR_PORT         GPIOD
-#define MOTOR_LEFT_DIR_PIN          GPIO_PIN_0
-#define MOTOR_RIGHT_DIR_PORT        GPIOD
-#define MOTOR_RIGHT_DIR_PIN         GPIO_PIN_1
-#define MOTOR_SKIS_DIR_PORT         GPIOD
-#define MOTOR_SKIS_DIR_PIN          GPIO_PIN_2
+#define MOTOR_SKIS_CHANNEL      TIM_CHANNEL_1
+#define MOTOR_SKIS_CCR          (TIM1->CCR1)
+#define MOTOR_SKIS_DIR_PORT     GPIOD
+#define MOTOR_SKIS_DIR_PIN      GPIO_PIN_2
 
 /* ── PID (встроен в Motor_t) ────────────────────────────────*/
-#define PID_KP                      1.5f
-#define PID_KI                      0.1f
-#define PID_KD                      0.05f
+#define PID_KP                      0.3f
+#define PID_KI                      0.0f
+#define PID_KD                      0.0f
 #define PID_OUTPUT_MAX              1.0f
 #define PID_OUTPUT_MIN             -1.0f
 #define PID_INTEGRAL_MAX            5.0f
@@ -105,7 +105,27 @@
 #define TASK_WATCHDOG_STACK         256U
 #define TASK_WATCHDOG_PRIORITY      osPriorityHigh
 
-/* ── Safety ─────────────────────────────────────────────────*/
+/* ── Встроенные LED (STM32F407VG Discovery) ─────────────────
+ *  PD12 — зелёный  LD4  IMU статус
+ *  PD13 — оранжевый LD3  моторы активны
+ *  PD14 — красный  LD5  heartbeat task_robot
+ *  PD15 — синий    LD6  ROS агент / консоль
+ *  PE1  — красный  LD7  авария / ошибка
+ * ────────────────────────────────────────────────────────── */
+#define LED_IMU_PORT        GPIOD
+#define LED_IMU_PIN         GPIO_PIN_12   /* зелёный  — IMU OK  */
+
+#define LED_MOTORS_PORT     GPIOD
+#define LED_MOTORS_PIN      GPIO_PIN_13   /* оранжевый — моторы */
+
+#define LED_HEARTBEAT_PORT  GPIOD
+#define LED_HEARTBEAT_PIN   GPIO_PIN_14   /* красный  — 100 Гц  */
+
+#define LED_COMM_PORT       GPIOD
+#define LED_COMM_PIN        GPIO_PIN_15   /* синий    — связь   */
+
+#define LED_ERROR_PORT      GPIOE
+#define LED_ERROR_PIN       GPIO_PIN_1    /* красный  — авария  */
 #define CMD_TIMEOUT_MS              500U
 
 /* ── micro-ROS ──────────────────────────────────────────────*/
@@ -127,9 +147,8 @@
  *  Смотреть вывод: любой Serial Monitor, 115200 бод,
  *  или: python -m serial.tools.miniterm COMx 115200
  * ────────────────────────────────────────────────────────── */
-
 /* #define DEBUG_MODE */
-#define DEBUG_MODE
+
 
 #ifdef DEBUG_MODE
 #define TASK_DEBUG_STACK        512U

@@ -36,8 +36,8 @@ static void con_puts(const char *str)
 {
     if (!str) return;
     uint16_t len = (uint16_t)strnlen(str, 256U);
-    uint32_t deadline = HAL_GetTick() + 30U;
-    while (HAL_GetTick() < deadline) {
+    uint32_t start = HAL_GetTick();
+    while ((HAL_GetTick() - start) < 30U) {
         if (CDC_Transmit_FS((uint8_t *)str, len) == USBD_OK)
             return;
         osDelay(1);
@@ -48,8 +48,8 @@ static void con_puts(const char *str)
 static void con_echo(char c)
 {
     uint8_t b = (uint8_t)c;
-    uint32_t deadline = HAL_GetTick() + 10U;
-    while (HAL_GetTick() < deadline) {
+    uint32_t start = HAL_GetTick();
+    while ((HAL_GetTick() - start) < 10U) {
         if (CDC_Transmit_FS(&b, 1U) == USBD_OK)
             return;
         osDelay(1);
@@ -149,9 +149,10 @@ static void handle_line(char *line)
 
     /* ── reset ────────────────────────────────────────────── */
     if (strcmp(line, "reset") == 0) {
-        encoder_reset(&g_enc_left);
-        encoder_reset(&g_enc_right);
-        con_puts("> encoders reset\r\n");
+        /* Энкодеры не подключены — сбрасываем уставки и WASD */
+        s_wasd_left = s_wasd_right = 0.0f;
+        console_set_cmd(0.0f, 0.0f);
+        con_puts("> reset (wasd zeroed, cmd = 0)\r\n");
         return;
     }
 
