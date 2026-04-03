@@ -14,7 +14,7 @@
 #include "stm32f4xx_hal.h"
 #include <string.h>
 
-#define RX_RING_SIZE  512U
+#define RX_RING_SIZE  1024U
 uint8_t           rx_ring[RX_RING_SIZE];
 volatile uint32_t rx_head = 0U;  /* пишется из USB ISR */
 volatile uint32_t rx_tail = 0U;  /* читается из task_microros */
@@ -46,7 +46,7 @@ size_t usb_cdc_transport_write(struct uxrCustomTransport *t,
 {
     (void)t;
     uint32_t start = HAL_GetTick();
-    while ((HAL_GetTick() - start) < 20U) {
+    while ((HAL_GetTick() - start) < 100U) {
         if (CDC_Transmit_FS((uint8_t *)buf, (uint16_t)len) == USBD_OK)
             return len;
         osDelay(1);
