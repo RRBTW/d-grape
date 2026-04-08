@@ -184,60 +184,7 @@ class Build:
             sys.exit(1)
 
     def package_mcu_library(self):
-        # Run packaging entirely in WSL to avoid Windows path issues
-        wsl_build = "/home/roma/micro_ros_build"
-        wsl_lib = "/mnt/c/Users/Roma/Documents/PlatformIO/Projects/d-grape/lib/micro_ros_platformio/libmicroros"
-        
-        script = """#!/bin/bash
-set -e
-BUILD={0}
-LIB={1}
-AUX=$BUILD/aux
-rm -rf $AUX $LIB
-mkdir -p $AUX/naming $LIB
-
-# Extract all .a files
-for f in $(find $BUILD/mcu/install/lib -name "*.a"); do
-    cd $AUX/naming
-    ar x $f
-    for obj in *.o *.obj 2>/dev/null; do
-        [ -f "$obj" ] && mv "$obj" "../$(basename $f .a)__$obj"
-    done
-done
-
-# Combine into libmicroros.a
-cd $AUX
-ar rc libmicroros.a $(ls *.o *.obj 2>/dev/null)
-ranlib libmicroros.a
-mv libmicroros.a $LIB/libmicroros.a
-
-# Copy includes
-cp -r $BUILD/mcu/install/include $LIB/include
-
-# Fix include paths (remove double nesting)
-for dir in $LIB/include/*/; do
-    name=$(basename $dir)
-    if [ -d "$dir$name" ]; then
-        cp -r "$dir$name/." "$dir"
-        rm -rf "$dir$name"
-    fi
-done
-echo "Packaging done"
-""".format(wsl_build, wsl_lib)
-
-        import tempfile, subprocess, os
-        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".sh", delete=False, newline="\n")
-        tmp.write(script)
-        tmp.close()
-        wsl_tmp = subprocess.run(["wsl", "wslpath", tmp.name.replace("\\\\", "/")],
-            capture_output=True, text=True).stdout.strip()
-        result = subprocess.run(["wsl", "bash", wsl_tmp], capture_output=True)
-        os.unlink(tmp.name)
-        if result.returncode != 0:
-            print("Packaging failed:", result.stderr.decode("utf-8", errors="replace"))
-            sys.exit(1)
-        print("micro-ROS library packaged successfully")
-        return
+        self.package_mcu_library_orig()
 
     def package_mcu_library_orig(self):
         binutils_path = self.resolve_binutils_path()

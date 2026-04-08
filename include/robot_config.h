@@ -90,19 +90,19 @@
 #define KF_YAW_R_ENC_W              0.05f    /* шум измерения: enc omega  */
 
 /* ── FreeRTOS задачи ────────────────────────────────────────*/
-#define TASK_IMU_STACK              512U
+#define TASK_IMU_STACK              768U
 #define TASK_IMU_PRIORITY           osPriorityAboveNormal
 #define TASK_IMU_PERIOD_MS          2U        /* 500 Гц */
 
-#define TASK_ROBOT_STACK            768U
+#define TASK_ROBOT_STACK            1024U
 #define TASK_ROBOT_PRIORITY         osPriorityNormal
 #define TASK_ROBOT_PERIOD_MS        10U       /* 100 Гц */
 
-#define TASK_MICROROS_STACK         3000U
+#define TASK_MICROROS_STACK         4096U
 #define TASK_MICROROS_PRIORITY      osPriorityNormal
-#define TASK_MICROROS_PERIOD_MS     25U       /* 40 Гц  */
+#define TASK_MICROROS_PERIOD_MS     20U       /* 50 Гц  */
 
-#define TASK_WATCHDOG_STACK         256U
+#define TASK_WATCHDOG_STACK         384U
 #define TASK_WATCHDOG_PRIORITY      osPriorityHigh
 
 /* ── Встроенные LED (STM32F407VG Discovery) ─────────────────
@@ -126,11 +126,11 @@
 
 #define LED_ERROR_PORT      GPIOE
 #define LED_ERROR_PIN       GPIO_PIN_1    /* красный  — авария  */
-#define CMD_TIMEOUT_MS              500U
+#define CMD_TIMEOUT_MS              5000U
 
 /* ── micro-ROS ──────────────────────────────────────────────*/
-#define MICROROS_AGENT_TIMEOUT_MS   100U
-#define MICROROS_AGENT_ATTEMPTS     1U
+#define MICROROS_AGENT_TIMEOUT_MS   500U
+#define MICROROS_AGENT_ATTEMPTS     5U
 
 /* ── Расчётные ──────────────────────────────────────────────*/
 #define PID_DT_S   (TASK_ROBOT_PERIOD_MS / 1000.0f)
@@ -147,11 +147,10 @@
  *  Смотреть вывод: любой Serial Monitor, 115200 бод,
  *  или: python -m serial.tools.miniterm COMx 115200
  * ────────────────────────────────────────────────────────── */
-/* #define DEBUG_MODE */
-
+/* #define DEBUG_MODE*/
 
 #ifdef DEBUG_MODE
-#define TASK_DEBUG_STACK        512U
+#define TASK_DEBUG_STACK        1024U
 #define TASK_DEBUG_PRIORITY     osPriorityNormal
 #define TASK_DEBUG_PERIOD_MS    100U   /* 10 Гц — не перегружаем USB */
 #endif
