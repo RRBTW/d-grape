@@ -22,12 +22,14 @@
 /* rcl_publish() объявлен с warn_unused_result — (void) не помогает в GCC.
  * Присваивание во временную переменную гарантированно гасит варнинг. */
 #  define RCL_PUB(pub, msg) do { rcl_ret_t _r = rcl_publish((pub),(msg),NULL); (void)_r; } while(0)
+
 #  include <rcl/rcl.h>
 #  include <rcl/error_handling.h>
 #  include <rclc/rclc.h>
 #  include <rclc/executor.h>
 #  include <rmw_microros/rmw_microros.h>
 #  include <geometry_msgs/msg/vector3.h>
+#  include <geometry_msgs/msg/twist.h>
 #  include <sensor_msgs/msg/imu.h>
 #  include <diagnostic_msgs/msg/diagnostic_array.h>
 #endif
@@ -93,19 +95,27 @@ static rcl_subscription_t  g_sub_wheel_cmd;
 static sensor_msgs__msg__Imu                 g_msg_imu;
 static geometry_msgs__msg__Vector3           g_msg_vel;
 static diagnostic_msgs__msg__DiagnosticArray g_msg_diag;
-static geometry_msgs__msg__Vector3           g_msg_wheel_cmd;
+static geometry_msgs__msg__Twist             g_msg_wheel_cmd;
 
-/* ── Callback: wheel_cmd ─────────────────────────────────── */
+/* ── Callback: cmd_vel (geometry_msgs/Twist → left/right m/s) ─ */
 static void wheel_cmd_callback(const void *msg_in)
 {
-    const geometry_msgs__msg__Vector3 *cmd =
-        (const geometry_msgs__msg__Vector3 *)msg_in;
+    const geometry_msgs__msg__Twist *cmd =
+        (const geometry_msgs__msg__Twist *)msg_in;
 
-    float l = cmd->x, r = cmd->y;
+    /* Дифференциальная кинематика:
+     *   v_l = vx - wz * (track/2)
+     *   v_r = vx + wz * (track/2)
+     * ROBOT_TRACK_WIDTH = 0.526 м → half = 0.263 м */
+    const float half_track = ROBOT_TRACK_WIDTH * 0.5f;
+    float vx = cmd->linear.x;
+    float wz = cmd->angular.z;
 
-    /* Баг 3: isfinite() ловит и NaN, и ±Inf — оба недопустимы как уставка */
-    if (!isfinite(l)) l = 0.0f;
-    if (!isfinite(r)) r = 0.0f;
+    if (!isfinite(vx)) vx = 0.0f;
+    if (!isfinite(wz)) wz = 0.0f;
+
+    float l = vx - wz * half_track;
+    float r = vx + wz * half_track;
 
     /* Clamp */
     const float MAX_MPS = 1.5f;
@@ -128,8 +138,21 @@ static void wheel_cmd_callback(const void *msg_in)
 }
 
 /* ── Инициализация micro-ROS (повторяется до успеха) ─────── */
+static bool s_ros_initialized = false;
+
 static bool ros_init(void)
 {
+    if (s_ros_initialized) {
+        rclc_executor_fini(&g_executor);
+        rcl_subscription_fini(&g_sub_wheel_cmd, &g_node);
+        rcl_publisher_fini(&g_pub_diag, &g_node);
+        rcl_publisher_fini(&g_pub_vel, &g_node);
+        rcl_publisher_fini(&g_pub_imu, &g_node);
+        rcl_node_fini(&g_node);
+        rclc_support_fini(&g_support);
+        s_ros_initialized = false;
+    }
+
     extern bool usb_cdc_transport_open(struct uxrCustomTransport *t);
     extern bool usb_cdc_transport_close(struct uxrCustomTransport *t);
     extern size_t usb_cdc_transport_write(struct uxrCustomTransport *t,
@@ -155,34 +178,62 @@ static bool ros_init(void)
     if (rclc_support_init(&g_support, 0, NULL, &g_allocator) != RCL_RET_OK)
         return false;
 
-    if (rclc_node_init_default(&g_node, "d_grape", "", &g_support) != RCL_RET_OK)
+    if (rclc_node_init_default(&g_node, "microros_hardware", "d_grape", &g_support) != RCL_RET_OK) {
+        rclc_support_fini(&g_support);
         return false;
+    }
 
-    rclc_publisher_init_default(
-        &g_pub_imu, &g_node,
+    /* Даём XRCE-DDS выслать pending ACK/heartbeat после node_init
+     * до того как начнём создавать publishers. Без этой паузы
+     * pending ACK + CREATE_TOPIC пакуются в один PDU и могут
+     * превысить MTU или застать CDC TX занятым. */
+    rmw_uros_ping_agent(50, 1);
+
+    /* Относительные имена топиков — пространство имён ноды (/d_grape)
+     * подставляется автоматически: "imu/filtered" → /d_grape/imu/filtered */
+    if (rclc_publisher_init_default(&g_pub_imu, &g_node,
         ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Imu),
-        "/d_grape/imu/filtered");
+        "imu/filtered") != RCL_RET_OK) {
+        rcl_node_fini(&g_node); rclc_support_fini(&g_support); return false;
+    }
 
-    rclc_publisher_init_default(
-        &g_pub_vel, &g_node,
+    if (rclc_publisher_init_default(&g_pub_vel, &g_node,
         ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Vector3),
-        "/d_grape/velocity");
+        "velocity") != RCL_RET_OK) {
+        rcl_publisher_fini(&g_pub_imu, &g_node);
+        rcl_node_fini(&g_node); rclc_support_fini(&g_support); return false;
+    }
 
-    rclc_publisher_init_default(
-        &g_pub_diag, &g_node,
+    if (rclc_publisher_init_default(&g_pub_diag, &g_node,
         ROSIDL_GET_MSG_TYPE_SUPPORT(diagnostic_msgs, msg, DiagnosticArray),
-        "/d_grape/diagnostics");
+        "diagnostics") != RCL_RET_OK) {
+        rcl_publisher_fini(&g_pub_vel, &g_node);
+        rcl_publisher_fini(&g_pub_imu, &g_node);
+        rcl_node_fini(&g_node); rclc_support_fini(&g_support); return false;
+    }
 
-    rclc_subscription_init_default(
-        &g_sub_wheel_cmd, &g_node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Vector3),
-        "/d_grape/wheel_cmd");
+    if (rclc_subscription_init_default(&g_sub_wheel_cmd, &g_node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),
+        "cmd_vel") != RCL_RET_OK) {
+        rcl_publisher_fini(&g_pub_diag, &g_node);
+        rcl_publisher_fini(&g_pub_vel, &g_node);
+        rcl_publisher_fini(&g_pub_imu, &g_node);
+        rcl_node_fini(&g_node); rclc_support_fini(&g_support); return false;
+    }
 
-    rclc_executor_init(&g_executor, &g_support.context, 1, &g_allocator);
+    if (rclc_executor_init(&g_executor, &g_support.context, 1, &g_allocator) != RCL_RET_OK) {
+        rcl_subscription_fini(&g_sub_wheel_cmd, &g_node);
+        rcl_publisher_fini(&g_pub_diag, &g_node);
+        rcl_publisher_fini(&g_pub_vel, &g_node);
+        rcl_publisher_fini(&g_pub_imu, &g_node);
+        rcl_node_fini(&g_node); rclc_support_fini(&g_support); return false;
+    }
+
     rclc_executor_add_subscription(
         &g_executor, &g_sub_wheel_cmd,
         &g_msg_wheel_cmd, wheel_cmd_callback, ON_NEW_DATA);
 
+    s_ros_initialized = true;
     return true;
 }
 
@@ -205,6 +256,12 @@ static void task_imu(void *arg)
     /* LD4 зелёный мигает медленно пока IMU не ответил */
     HAL_GPIO_WritePin(LED_IMU_PORT, LED_IMU_PIN, GPIO_PIN_RESET);
 
+    /* Сбрасываем tick после imu_init: он занимает ~110 мс (osDelay внутри),
+     * иначе osDelayUntil обнаружит что время уже прошло и вернёт ошибку
+     * без блокировки — task_imu начнёт крутиться без yield, вытесняя
+     * task_robot и не давая ему пинговать watchdog. */
+    tick = osKernelGetTickCount();
+
     for (;;) {
         osDelayUntil(tick += TASK_IMU_PERIOD_MS);
 
@@ -222,6 +279,10 @@ static void task_imu(void *arg)
                 HAL_GPIO_TogglePin(LED_IMU_PORT, LED_IMU_PIN);
                 imu_err_count = 0U;
             }
+            /* I2C завис на таймауте (~2 мс polling busy-wait при IMU_I2C_TIMEOUT_MS=1).
+             * Если не сбросить tick, osDelayUntil вернётся сразу (цель уже в прошлом),
+             * task_imu начнёт крутиться без yield и вытеснит task_robot → watchdog reset. */
+            tick = osKernelGetTickCount();
         }
     }
 }
@@ -314,7 +375,7 @@ static void task_microros(void *arg)
     MX_USB_DEVICE_Init();
 
     /* Даём хосту время перечислить устройство (CDC enumeration) */
-    osDelay(500);
+    osDelay(1000);
 
     /* LD6 синий — мигаем пока ищем агента */
     HAL_GPIO_WritePin(LED_COMM_PORT, LED_COMM_PIN, GPIO_PIN_RESET);
@@ -334,14 +395,14 @@ static void task_microros(void *arg)
         osDelayUntil(tick += TASK_MICROROS_PERIOD_MS);
 
         /* Раз в ~2 с проверяем связь с агентом */
-        if (++ping_cnt >= (2000U / TASK_MICROROS_PERIOD_MS)) {
+        if (++ping_cnt >= (1000U / TASK_MICROROS_PERIOD_MS)) {
             ping_cnt = 0U;
             if (rmw_uros_ping_agent(MICROROS_AGENT_TIMEOUT_MS,
                                     MICROROS_AGENT_ATTEMPTS) != RMW_RET_OK) {
                 HAL_GPIO_WritePin(LED_COMM_PORT, LED_COMM_PIN, GPIO_PIN_RESET);
                 while (!ros_init()) {
                     HAL_GPIO_TogglePin(LED_COMM_PORT, LED_COMM_PIN);
-                    osDelay(500);
+                    osDelay(100);
                 }
                 HAL_GPIO_WritePin(LED_COMM_PORT, LED_COMM_PIN, GPIO_PIN_SET);
                 tick = osKernelGetTickCount();
@@ -356,11 +417,6 @@ static void task_microros(void *arg)
         osMutexAcquire(g_kf_mutex, osWaitForever);
         kf = g_kf_out;
         osMutexRelease(g_kf_mutex);
-
-        if (!kf.valid) {
-            RCL_PUB(&g_pub_diag, &g_msg_diag);
-            continue;
-        }
 
         g_msg_imu.linear_acceleration.x            = kf.velocity_mps;
         g_msg_imu.linear_acceleration.y            = 0.0f;
@@ -570,6 +626,17 @@ void freertos_app_init(void)
 
     g_imu_mutex = osMutexNew(NULL);
     g_kf_mutex  = osMutexNew(NULL);
+
+    /* Если мьютекс не создан — heap исчерпан до старта FreeRTOS.
+     * В этом случае vApplicationMallocFailedHook не вызывается,
+     * поэтому явно входим в fault-петлю (PD14 + PE1 мигают). */
+    if (!g_imu_mutex || !g_kf_mutex) {
+        while (1) {
+            HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_14);
+            HAL_GPIO_TogglePin(GPIOE, GPIO_PIN_1);
+            for (volatile uint32_t i = 0; i < 8400000UL; i++) {}
+        }
+    }
 
 #ifdef DEBUG_MODE
     debug_init();
